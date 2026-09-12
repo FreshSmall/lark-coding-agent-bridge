@@ -164,6 +164,61 @@ describe('agent-aware session catalog', () => {
     expect(catalog.entries()).toHaveLength(1000);
     await catalog.flush();
   });
+
+  it('archives every active entry for a scope regardless of fingerprint drift', async () => {
+    const catalog = new SessionCatalog(await path());
+    // The fingerprint is part of the catalog key, so a config change mints a
+    // fresh active entry and leaves the old one behind. /new has to clear all
+    // of them — matching on one fingerprint silently leaves a resumable entry.
+    for (const fp of ['fp-1', 'fp-2', 'fp-3']) {
+      catalog.upsertActive({
+        scopeId: 'chat-1',
+        agentId: 'claude',
+        cwdRealpath: '/repo',
+        policyFingerprint: fp,
+        sessionId: `sess-${fp}`,
+      });
+    }
+    // Another scope and another agent must be left untouched.
+    catalog.upsertActive({
+      scopeId: 'chat-2',
+      agentId: 'claude',
+      cwdRealpath: '/repo',
+      policyFingerprint: 'fp-1',
+      sessionId: 'other-scope',
+    });
+    catalog.upsertActive({
+      scopeId: 'chat-1',
+      agentId: 'codex',
+      cwdRealpath: '/repo',
+      policyFingerprint: 'fp-1',
+      threadId: 'other-agent',
+    });
+
+    expect(catalog.archiveAllForScope({ scopeId: 'chat-1', agentId: 'claude' })).toBe(3);
+
+    for (const fp of ['fp-1', 'fp-2', 'fp-3']) {
+      expect(
+        catalog.activeFor({
+          scopeId: 'chat-1',
+          agentId: 'claude',
+          cwdRealpath: '/repo',
+          policyFingerprint: fp,
+        }),
+      ).toBeUndefined();
+    }
+    expect(
+      catalog.activeFor({ scopeId: 'chat-2', agentId: 'claude', cwdRealpath: '/repo', policyFingerprint: 'fp-1' }),
+    ).toBeDefined();
+    expect(
+      catalog.activeFor({ scopeId: 'chat-1', agentId: 'codex', cwdRealpath: '/repo', policyFingerprint: 'fp-1' }),
+    ).toBeDefined();
+  });
+
+  it('reports zero when a scope has nothing active to archive', async () => {
+    const catalog = new SessionCatalog(await path());
+    expect(catalog.archiveAllForScope({ scopeId: 'chat-1', agentId: 'claude' })).toBe(0);
+  });
 });
 
 async function path(): Promise<string> {

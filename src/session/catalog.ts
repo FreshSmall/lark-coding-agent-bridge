@@ -132,6 +132,28 @@ export class SessionCatalog {
     return true;
   }
 
+  /**
+   * Archive every active entry for a scope+agent, whatever their cwd or policy
+   * fingerprint. `archiveActive` matches one exact key, but the fingerprint
+   * shifts whenever access/attachment config changes — so a scope accumulates
+   * several active entries and the by-key archive silently misses the one that
+   * `activeFor` would resume. `/new` means "this scope starts over", so it has
+   * to clear all of them. Returns how many were archived.
+   */
+  archiveAllForScope(input: { scopeId: string; agentId: CatalogAgentId; now?: number }): number {
+    const now = input.now ?? Date.now();
+    let archived = 0;
+    for (const [key, entry] of this.data) {
+      if (entry.scopeId !== input.scopeId) continue;
+      if (entry.agentId !== input.agentId) continue;
+      if (entry.status !== 'active') continue;
+      this.data.set(key, { ...entry, status: 'archived', updatedAt: now });
+      archived += 1;
+    }
+    if (archived > 0) this.schedulePersist();
+    return archived;
+  }
+
   entries(): SessionCatalogEntry[] {
     return [...this.data.values()].map((entry) => ({ ...entry }));
   }

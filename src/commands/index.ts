@@ -360,14 +360,24 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   }
 
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
-  if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
-    ctx.sessionCatalog.archiveActive({
-      ...ctx.sessionCatalogIdentity,
-      now: Date.now(),
-    });
-  }
+  // Archive by scope, not by exact identity: the catalog key includes the
+  // policy fingerprint, which drifts whenever access/attachment config
+  // changes, so a scope accrues several active entries. run-flow resumes from
+  // whichever one matches the current fingerprint, so archiving only the
+  // identity we computed here would leave a resumable entry behind and /new
+  // would silently do nothing.
+  const archived = ctx.sessionCatalog?.archiveAllForScope({
+    scopeId: ctx.scope,
+    agentId: ctx.controls.profileConfig.agentKind,
+    now: Date.now(),
+  });
   await releasePreviousClaudeSession(ctx, ctx.scope);
   ctx.sessions.clear(ctx.scope);
+  log.info('command', 'new', {
+    scope: ctx.scope,
+    wasRunning,
+    catalogArchived: archived ?? 0,
+  });
   await reply(ctx, wasRunning ? '已中断当前任务并开始新会话。' : '已开始新会话。');
 }
 

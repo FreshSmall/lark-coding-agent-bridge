@@ -6,6 +6,7 @@ import type { NormalizedMessage } from '@larksuite/channel';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema.js';
+import { SessionCatalog } from '../../../src/session/catalog.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { createFakeAgent, type FakeAgentRun } from '../../helpers/fake-agent.js';
@@ -51,6 +52,54 @@ describe('Claude slash command visible behavior', () => {
     await expect(h.run('/reset')).resolves.toBe(true);
     expect(lastMarkdown(h.channel)).toBe('已开始新会话。');
     expect(h.sessions.getRaw('chat-1')).toBeUndefined();
+  });
+
+  it('archives every catalog entry for the scope on /new, not just the current fingerprint', async () => {
+    const h = await createHarness();
+    const cwd = await realpath(h.tmp.workspace);
+    const catalog = new SessionCatalog(join(h.tmp.profile, 'catalog.json'));
+    // A config change mints a new fingerprint and leaves the old entry active.
+    // run-flow resumes from whichever entry matches, so /new must clear both.
+    for (const fp of ['fp-old', 'fp-current']) {
+      catalog.upsertActive({
+        scopeId: 'chat-1',
+        agentId: 'claude',
+        cwdRealpath: cwd,
+        policyFingerprint: fp,
+        sessionId: `sess-${fp}`,
+      });
+    }
+
+    const handled = await tryHandleCommand({
+      channel: h.channel as unknown as CommandContext['channel'],
+      msg: message('/new'),
+      scope: 'chat-1',
+      chatMode: 'p2p',
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      agent: h.agent,
+      activeRuns: h.activeRuns,
+      controls: h.controls,
+      sessionCatalog: catalog,
+      sessionCatalogIdentity: {
+        scopeId: 'chat-1',
+        agentId: 'claude',
+        cwdRealpath: cwd,
+        policyFingerprint: 'fp-current',
+      },
+    });
+
+    expect(handled).toBe(true);
+    for (const fp of ['fp-old', 'fp-current']) {
+      expect(
+        catalog.activeFor({
+          scopeId: 'chat-1',
+          agentId: 'claude',
+          cwdRealpath: cwd,
+          policyFingerprint: fp,
+        }),
+      ).toBeUndefined();
+    }
   });
 
   it('keeps the per-scope timeout override when /new clears the resumable session', async () => {

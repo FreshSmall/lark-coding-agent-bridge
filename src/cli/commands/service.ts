@@ -293,7 +293,7 @@ export async function runServiceStart(opts: ServiceStartOptions = {}): Promise<v
     },
   });
 
-  await adapter.install();
+  await adapter.install(profileConfig?.daemonEnv);
 
   // If already running, stop first so start operations don't race.
   if (adapter.isRunning()) {

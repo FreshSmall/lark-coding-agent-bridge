@@ -10,6 +10,7 @@ import {
   windowsLauncherCmdPath,
 } from './paths';
 import { paths } from '../config/paths';
+import { extraEnvEntries } from './launchd';
 
 export interface LauncherInputs {
   /** Absolute path to node.exe. */
@@ -22,6 +23,8 @@ export interface LauncherInputs {
   profile: string;
   /** Root directory for config/profile state. */
   channelHome: string;
+  /** Extra daemon environment from `daemonEnv` in the profile config. Built-in keys win. */
+  env?: Record<string, string>;
 }
 
 /**
@@ -41,12 +44,16 @@ export function buildLauncherCmd(inputs: LauncherInputs): string {
     '@echo off',
     `set "LARK_CHANNEL_HOME=${inputs.channelHome}"`,
     `set "PATH=${inputs.envPath}"`,
+    ...extraEnvEntries(inputs.env).map(([k, v]) => `set "${k}=${v}"`),
     `"${inputs.nodePath}" "${inputs.bridgeEntryPath}" run --profile "${inputs.profile}" >> "${daemonStdoutPath(inputs.profile)}" 2>> "${daemonStderrPath(inputs.profile)}"`,
     '',
   ].join('\r\n');
 }
 
-async function writeLauncherCmd(profile: string): Promise<void> {
+async function writeLauncherCmd(
+  profile: string,
+  env?: Record<string, string>,
+): Promise<void> {
   const bridgeEntryPath = process.argv[1];
   if (!bridgeEntryPath) {
     throw new Error('cannot determine bridge entry path (process.argv[1] is empty)');
@@ -57,6 +64,7 @@ async function writeLauncherCmd(profile: string): Promise<void> {
     envPath: process.env.PATH ?? '',
     profile,
     channelHome: paths.rootDir,
+    ...(env ? { env } : {}),
   });
   const cmdPath = windowsLauncherCmdPath(profile);
   await mkdir(dirname(cmdPath), { recursive: true });
@@ -87,8 +95,11 @@ function runSchtasks(args: string[]): SchtasksResult {
  * The /TR value is the .cmd wrapper path. Schtasks treats /TR as a command
  * line, so wrapping in quotes keeps spaces in the path intact.
  */
-export async function installTask(profile: string): Promise<SchtasksResult> {
-  await writeLauncherCmd(profile);
+export async function installTask(
+  profile: string,
+  env?: Record<string, string>,
+): Promise<SchtasksResult> {
+  await writeLauncherCmd(profile, env);
   return runSchtasks([
     '/Create',
     '/F',

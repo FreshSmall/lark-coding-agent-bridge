@@ -10,6 +10,7 @@ import {
   systemdUnitPath,
 } from './paths';
 import { paths } from '../config/paths';
+import { extraEnvEntries } from './launchd';
 
 export interface UnitInputs {
   /** Absolute path to the node binary that should run the bridge. */
@@ -24,6 +25,8 @@ export interface UnitInputs {
   profile: string;
   /** Root directory for config/profile state. */
   channelHome: string;
+  /** Extra daemon environment from `daemonEnv` in the profile config. Built-in keys win. */
+  env?: Record<string, string>;
 }
 
 /**
@@ -55,13 +58,19 @@ StandardOutput=append:${daemonStdoutPath(inputs.profile)}
 StandardError=append:${daemonStderrPath(inputs.profile)}
 Environment="PATH=${escape(inputs.envPath)}"
 Environment="LARK_CHANNEL_HOME=${escape(inputs.channelHome)}"
-
+${extraEnvEntries(inputs.env)
+  .map(([k, v]) => `Environment="${escape(k)}=${escape(v)}"
+`)
+  .join('')}
 [Install]
 WantedBy=default.target
 `;
 }
 
-export async function writeUnit(profile: string): Promise<void> {
+export async function writeUnit(
+  profile: string,
+  env?: Record<string, string>,
+): Promise<void> {
   const bridgeEntryPath = process.argv[1];
   if (!bridgeEntryPath) {
     throw new Error('cannot determine bridge entry path (process.argv[1] is empty)');
@@ -72,6 +81,7 @@ export async function writeUnit(profile: string): Promise<void> {
     envPath: process.env.PATH ?? '',
     profile,
     channelHome: paths.rootDir,
+    ...(env ? { env } : {}),
   });
   const unitPath = systemdUnitPath(profile);
   await mkdir(dirname(unitPath), { recursive: true });

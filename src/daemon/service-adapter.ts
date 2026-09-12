@@ -30,8 +30,12 @@ export interface ServiceAdapter {
   /** Path/name to the service definition (for status output). */
   servicePath(): string;
 
-  /** Write or overwrite the service definition. */
-  install(): Promise<void>;
+  /**
+   * Write or overwrite the service definition. `env` is baked into the file's
+   * environment block — it must be passed on every install, since this
+   * rewrites the file wholesale and would otherwise drop it.
+   */
+  install(env?: Record<string, string>): Promise<void>;
 
   /** Start the service (enables autostart where applicable). */
   start(): ServiceResultLike;
@@ -67,7 +71,7 @@ function makeLaunchdAdapter(profile: string): ServiceAdapter {
     fileExists: () => launchd.plistExists(profile),
     isRunning: () => launchd.isLoaded(profile),
     servicePath: () => launchAgentPlistPath(profile),
-    install: () => launchd.writePlist(profile),
+    install: (env) => launchd.writePlist(profile, env),
     start: () => launchd.bootstrap(profile),
     stop: () => launchd.bootout(profile),
     // launchd has no separate "disable" — bootout already removes the
@@ -90,8 +94,8 @@ function makeSystemdAdapter(profile: string): ServiceAdapter {
     fileExists: () => systemd.unitExists(profile),
     isRunning: () => systemd.isActive(profile),
     servicePath: () => systemdUnitPath(profile),
-    install: async () => {
-      await systemd.writeUnit(profile);
+    install: async (env) => {
+      await systemd.writeUnit(profile, env);
       // systemd needs daemon-reload after any unit file change.
       systemd.daemonReload();
     },
@@ -125,8 +129,8 @@ function makeSchtasksAdapter(profile: string): ServiceAdapter {
     // registration (queryable via schtasks) and the launcher .cmd we wrote.
     // The task name is what the user would search for in Task Scheduler UI.
     servicePath: () => windowsTaskName(profile),
-    install: async () => {
-      const r = await schtasks.installTask(profile);
+    install: async (env) => {
+      const r = await schtasks.installTask(profile, env);
       if (!r.ok) throw new Error(r.stderr || 'schtasks /Create failed');
     },
     start: () => schtasks.runTask(profile),

@@ -25,6 +25,13 @@ export interface PlistInputs {
   profile: string;
   /** Root directory for config/profile state. */
   channelHome: string;
+  /**
+   * Extra environment for the daemon process, from `daemonEnv` in the profile
+   * config. Rendered alongside the built-ins so that re-installing the service
+   * (which rewrites this file wholesale) keeps them — hand-editing the plist
+   * does not survive `bridge start`. Built-in keys win.
+   */
+  env?: Record<string, string>;
 }
 
 export function buildPlist(inputs: PlistInputs): string {
@@ -61,14 +68,26 @@ export function buildPlist(inputs: PlistInputs): string {
         <key>PATH</key>
         <string>${escape(inputs.envPath)}</string>
         <key>LARK_CHANNEL_HOME</key>
-        <string>${escape(inputs.channelHome)}</string>
+        <string>${escape(inputs.channelHome)}</string>${extraEnvEntries(inputs.env)
+          .map(([k, v]) => `
+        <key>${escape(k)}</key>
+        <string>${escape(v)}</string>`)
+          .join('')}
     </dict>
 </dict>
 </plist>
 `;
 }
 
-export async function writePlist(profile: string): Promise<void> {
+/** Caller-supplied env minus the keys the daemon file owns. */
+export function extraEnvEntries(env: Record<string, string> | undefined): Array<[string, string]> {
+  return Object.entries(env ?? {}).filter(([k]) => k !== 'PATH' && k !== 'LARK_CHANNEL_HOME');
+}
+
+export async function writePlist(
+  profile: string,
+  env?: Record<string, string>,
+): Promise<void> {
   const bridgeEntryPath = process.argv[1];
   if (!bridgeEntryPath) {
     throw new Error('cannot determine bridge entry path (process.argv[1] is empty)');
@@ -79,6 +98,7 @@ export async function writePlist(profile: string): Promise<void> {
     envPath: process.env.PATH ?? '',
     profile,
     channelHome: paths.rootDir,
+    ...(env ? { env } : {}),
   });
   const plistPath = launchAgentPlistPath(profile);
   await mkdir(dirname(plistPath), { recursive: true });

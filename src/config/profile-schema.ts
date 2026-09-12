@@ -90,6 +90,13 @@ export interface ProfileConfig {
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
+  /**
+   * Extra environment baked into the OS service file (launchd plist / systemd
+   * unit / Windows launcher). `bridge start` rewrites that file wholesale, so
+   * hand-edits there are lost — put anything the daemon's child processes need
+   * (e.g. ANTHROPIC_MODEL, CLAUDE_CODE_AUTO_COMPACT_WINDOW) here instead.
+   */
+  daemonEnv?: Record<string, string>;
   attachments: AttachmentConfig;
   comments: CommentConfig;
   larkCli: LarkCliConfig;
@@ -128,6 +135,16 @@ export function createDefaultProfileConfig(
   });
 }
 
+/** String-valued entries only — anything else would break the service file. */
+function normalizeDaemonEnv(input: unknown): Record<string, string> | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function normalizeProfileConfig(input: unknown): ProfileConfig {
   if (!input || typeof input !== 'object') {
     throw new Error('profile config must be an object');
@@ -150,6 +167,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
+    daemonEnv?: unknown;
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
     larkCli?: unknown;
@@ -179,6 +197,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   const workspaces = normalizeWorkspaces(raw.workspaces);
   const comments = normalizeComments(raw.comments);
   const larkCli = normalizeLarkCli(raw.larkCli);
+  const daemonEnv = normalizeDaemonEnv(raw.daemonEnv);
 
   return {
     schemaVersion: 2,
@@ -192,6 +211,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions,
     permissionSource,
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
+    ...(daemonEnv ? { daemonEnv } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
       maxBytes: numberOr(raw.attachments?.maxBytes, 100 * 1024 * 1024),

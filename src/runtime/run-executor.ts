@@ -186,6 +186,12 @@ export class RunExecutor {
     }), async () => {
       await cleanup(!handle.interrupted);
     });
+    // Drive the stream immediately instead of waiting for a subscriber. The
+    // cleanup that unregisters the scope and releases the pool slot hangs off
+    // the fanout's completion, so a caller that throws before it ever drains
+    // `subscribe()` (e.g. sending the reply card fails) used to leak the scope
+    // lock forever — every later message in that chat got `run-already-active`.
+    fanout.start();
 
     return {
       runId,
@@ -194,6 +200,11 @@ export class RunExecutor {
       handle,
       subscribe: () => fanout.subscribe(),
       stop: async () => {
+        // Already drained + cleaned up: the agent session may have been handed
+        // back to the pool for reuse, so stopping now would kill a live session
+        // that no longer belongs to this run. Callers stop defensively on their
+        // own failure paths, so this has to be a no-op rather than an error.
+        if (cleaned) return;
         handle.interrupted = true;
         await run.stop();
         await run.waitForExit(this.postDoneExitGraceMs);
@@ -283,7 +294,7 @@ class EventFanout {
     };
   }
 
-  private start(): void {
+  start(): void {
     if (this.started) return;
     this.started = true;
     void this.pump();

@@ -39,9 +39,45 @@ export async function sendManagedCard(
           ...(opts.replyInThread ? { replyInThread: true } : {}),
         }
       : undefined;
-  const { messageId } = await channel.send(recipientId, { cardId }, sendOpts);
+  let messageId: string;
+  try {
+    ({ messageId } = await channel.send(recipientId, { cardId }, sendOpts));
+  } catch (err) {
+    if (!sendOpts?.replyTo || !isDeadReplyTarget(err)) throw err;
+    // The message we were replying to is gone (the user recalled it). Reply
+    // threading is cosmetic — never let it kill the whole run. Resend
+    // top-level, the same fallback the SDK applies for its own revoked-target
+    // codes (it just doesn't recognise 230011).
+    log.warn('card', 'reply-target-gone', { replyTo: sendOpts.replyTo });
+    const retryOpts = sendOpts.replyInThread ? { replyInThread: true } : undefined;
+    ({ messageId } = await channel.send(recipientId, { cardId }, retryOpts));
+  }
   byMessageId.set(messageId, { cardId, sequence: 0 });
   return { messageId, cardId };
+}
+
+/**
+ * Feishu codes that all mean "the message you are replying to no longer
+ * exists": 230011 recalled, 230017 / 230020 target revoked.
+ */
+const DEAD_REPLY_TARGET_CODES = new Set([230011, 230017, 230020]);
+
+function isDeadReplyTarget(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const e = current as {
+      code?: unknown;
+      data?: { code?: unknown };
+      response?: { data?: { code?: unknown } };
+      cause?: unknown;
+    };
+    const code = e.response?.data?.code ?? e.data?.code ?? e.code;
+    if (typeof code === 'number' && DEAD_REPLY_TARGET_CODES.has(code)) return true;
+    current = e.cause;
+  }
+  return false;
 }
 
 /**

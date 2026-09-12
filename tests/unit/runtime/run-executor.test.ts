@@ -59,3 +59,60 @@ async function collect(events: AsyncIterable<unknown>): Promise<unknown[]> {
   for await (const event of events) out.push(event);
   return out;
 }
+
+describe('RunExecutor lifecycle safety', () => {
+  it('releases the scope and the pool slot when nobody ever subscribes', async () => {
+    const agent = new FakeAgentAdapter({
+      events: [{ type: 'done', terminationReason: 'normal' }],
+    });
+    const activeRuns = new ActiveRuns();
+    const pool = new ProcessPool(() => 1);
+    const executor = new RunExecutor({
+      agent,
+      pool,
+      activeRuns,
+      createRunId: () => 'run-orphan',
+      now: () => 1000,
+      postDoneExitGraceMs: 0,
+    });
+
+    // Caller submits, then blows up before it ever drains execution.subscribe()
+    // — exactly what happens when sending the reply card fails.
+    await executor.submit({ scopeId: 'scope-orphan', policy: policy() });
+
+    await waitFor(() => activeRuns.get('scope-orphan') === undefined);
+    expect(pool.snapshot().active).toBe(0);
+  });
+
+  it('does not touch the agent again when stopping an already finished run', async () => {
+    const agent = new FakeAgentAdapter({
+      events: [{ type: 'done', terminationReason: 'normal' }],
+    });
+    const executor = new RunExecutor({
+      agent,
+      pool: new ProcessPool(() => 1),
+      activeRuns: new ActiveRuns(),
+      createRunId: () => 'run-settled',
+      now: () => 1000,
+      postDoneExitGraceMs: 0,
+    });
+
+    const execution = await executor.submit({ scopeId: 'scope-settled', policy: policy() });
+    await collect(execution.subscribe());
+
+    // A caller that fails *after* the stream completed must not be able to
+    // kill the underlying (reusable) agent session by stopping a dead run.
+    await execution.stop();
+
+    expect(agent.runs[0]?.stopped).toBe(false);
+  });
+});
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('timed out waiting for async work');
+}

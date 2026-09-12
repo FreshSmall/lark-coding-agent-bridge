@@ -999,6 +999,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   } catch (err) {
     log.fail('stream', err);
+    // We may have failed before ever draining the event stream (e.g. sending
+    // the reply card threw), leaving the run spinning with the scope locked.
+    // Terminate it now — stop() is a no-op once the run has already finished.
+    await execution.stop().catch((stopErr) => {
+      log.warn('run', 'post-failure-stop-failed', {
+        scope,
+        err: stopErr instanceof Error ? stopErr.message : String(stopErr),
+      });
+    });
   } finally {
     activePolicyFingerprints.delete(scope);
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);

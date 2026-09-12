@@ -17,6 +17,9 @@ export interface TranslatorSnapshot {
 
 const TEXT_TAIL_MAX = 200;
 
+/** `message.model` value Claude Code uses for turns it fabricates itself. */
+const SYNTHETIC_MODEL = '<synthetic>';
+
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + '…';
 }
@@ -107,6 +110,8 @@ interface ContentBlock {
 interface AssistantMessage {
   content?: ContentBlock[];
   stop_reason?: string;
+  /** `'<synthetic>'` for turns the CLI fabricates rather than sampling. */
+  model?: string;
   usage?: {
     input_tokens?: number;
     cache_creation_input_tokens?: number;
@@ -192,6 +197,12 @@ export class JsonlTurnTranslator {
     const entry = raw as JsonlEntry;
     if (entry.type === 'assistant') {
       const message = entry.message as AssistantMessage | undefined;
+      // Claude Code fabricates a zero-token `<synthetic>` assistant turn to keep
+      // the transcript alternating after `[Request interrupted by user]` or a
+      // `Continue from where you left off.` resume. Its body ("No response
+      // requested.") is bookkeeping, not a reply — rendering it would open the
+      // Lark card with a line the model never wrote.
+      if (message?.model === SYNTHETIC_MODEL) return;
       if (message?.usage) {
         const u = message.usage;
         this.inputTokens +=

@@ -27,6 +27,24 @@ describe('JsonlTurnTranslator', () => {
     ]);
   });
 
+  it('drops synthetic placeholder messages the CLI writes after an interrupt', () => {
+    // Claude Code injects a `<synthetic>` assistant turn (zero tokens) to keep
+    // the transcript alternating after `[Request interrupted by user]` or a
+    // `Continue from where you left off.` resume. It is bookkeeping, not a
+    // reply — surfacing it puts "No response requested." in the Lark card.
+    expect(run([
+      {
+        type: 'assistant',
+        message: {
+          model: '<synthetic>',
+          stop_reason: 'stop_sequence',
+          usage: { input_tokens: 0, output_tokens: 0 },
+          content: [{ type: 'text', text: 'No response requested.' }],
+        },
+      },
+    ])).toEqual([]);
+  });
+
   it('translates thinking blocks', () => {
     expect(run([
       { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'plan' }] } },

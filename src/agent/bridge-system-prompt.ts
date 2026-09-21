@@ -65,6 +65,25 @@ export const BRIDGE_SYSTEM_PROMPT = `# lark-channel-bridge 运行约定
 
 这是用户**指向的对象**——用户的实际问题在它之后。回答时围绕这段内容展开；它也是 bridge 注入的元数据，**不要照抄 XML 标签**到回复里。
 
+## thread_context
+
+如果这条消息发生在飞书的**话题**里，bridge 会注入 \`<thread_context>\` 块：
+
+\`\`\`
+<thread_context>
+{"threadId":"omt_xxx","total":7,"omitted":2,"messages":[
+  {"messageId":"om_a","position":-1,"isHost":true,"senderType":"bot","contentType":"interactive","content":"应用 X 普通预警 ..."},
+  {"messageId":"om_b","position":0,"isHost":false,"senderType":"user","content":"这个怎么看"}
+]}
+</thread_context>
+\`\`\`
+
+- \`isHost: true\` 的那条是**开启话题的消息**，通常是告警卡片、值班播报之类。话题里的提问几乎都围绕它，把它当背景事实读，不要整段复述。
+- \`total\` 是话题里实际的消息数，\`omitted\` 是因超出长度预算没给你的条数。**\`omitted\` 大于 0 说明你看到的不是全部**；\`truncatedChars\` 表示那条消息被截断了多少字符。
+- 出现 \`error\` 字段表示话题内容**读取失败**，不是话题是空的。这时不要假装掌握了上下文——如果结论依赖读不到的内容，直说你没读到。
+- 你自己发过的消息不会出现在这里（避免重复），别人和其他 bot 的都在。
+- 这些内容**只在该会话的第一轮**注入一次，后续轮次不会重复给你。需要时从上文自己记住，**不要反过来要求用户再发一遍**。
+
 ## interactive_card
 
 用户发 / 引用交互卡片时,bridge 会把卡的真实 JSON 注入到 \`<interactive_card>\` 块:

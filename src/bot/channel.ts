@@ -11,6 +11,7 @@ import {
   type BridgePromptInteractiveCard,
   type BridgePromptMention,
   type BridgePromptQuotedMessage,
+  type BridgePromptThreadContext,
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { AskQuestionFlow } from './ask-question-flow';
@@ -42,6 +43,9 @@ import {
   getRunIdleTimeoutMs,
   getSessionRotateMaxBytes,
   getToolCallDisplay,
+  getThreadContext,
+  getThreadContextMaxChars,
+  getThreadContextMaxMessageChars,
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { log, reportMetric, withTrace } from '../core/logger';
@@ -67,6 +71,7 @@ import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, type QuotedContext } from './quote';
+import { fetchThreadContext } from './thread-history';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
@@ -550,6 +555,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     sender: msg.senderId,
     preview,
     resources: msg.resources.length,
+    // Thread shape: whether the event carries the fields thread-context
+    // injection depends on. Feishu omits these on non-threaded messages, and
+    // their absence on a threaded one is the first thing to check when a
+    // thread fails to be picked up.
+    threadId: msg.threadId,
+    rootId: msg.rootId,
+    replyTo: msg.replyToMessageId,
   });
 
   const accessDecision =
@@ -676,9 +688,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  // Collect any reply-quote targets in the batch. Dedup so the same target
-  // quoted by multiple messages in one batch only fetches once. Filter out
-  // ids that are themselves in the batch — those are already in the prompt.
+  // Two independent context sources, kept in separate prompt sections because
+  // they mean different things to the agent: a quote is what the user pointed
+  // at, a thread is the surroundings they're speaking in.
   const batchIds = new Set(batch.map((m) => m.messageId));
   const quoteTargets = [
     ...new Set(
@@ -700,7 +712,42 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity);
+  // The thread the message sits in — for an alert thread this is where the
+  // alert card itself lives (Feishu returns it at position -1). Fetched once
+  // per session: the agent carries it from there, and every path that resets
+  // the session (/new, /cd, /ws use, rotation) clears the marker too.
+  let threadContext: BridgePromptThreadContext | undefined;
+  if (
+    threadId &&
+    getThreadContext(controls.cfg) &&
+    !sessions.hasInjectedThreadContext(scope, threadId)
+  ) {
+    const fetched = await fetchThreadContext(channel, threadId, {
+      selfIds: [channel.botIdentity?.openId, controls.profileConfig.accounts.app.id].filter(
+        (id): id is string => Boolean(id),
+      ),
+      excludeMessageIds: [...batchIds],
+      maxTotalChars: getThreadContextMaxChars(controls.cfg),
+      maxMessageChars: getThreadContextMaxMessageChars(controls.cfg),
+    });
+    // Inject on failure too — an agent that can't tell "empty thread" from
+    // "couldn't read the thread" will answer confidently from nothing.
+    if (fetched.messages.length > 0 || fetched.error) {
+      threadContext = fetched;
+    }
+    log.info('thread', 'context', {
+      threadId,
+      total: fetched.total,
+      included: fetched.messages.length,
+      omitted: fetched.omitted,
+      chars: fetched.messages.reduce((n, m) => n + m.content.length, 0),
+      error: fetched.error,
+    });
+    // Only mark once real content landed, so a transient failure retries.
+    if (fetched.messages.length > 0) sessions.markThreadContextInjected(scope, threadId);
+  }
+
+  const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity, threadContext);
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
 
   // Thread the reply when policy says so: topic groups (when the message is
@@ -1469,6 +1516,7 @@ function buildPrompt(
   attachments: LocalAttachment[],
   quotes: QuotedContext[] = [],
   botIdentity?: { openId: string; name?: string },
+  threadContext?: BridgePromptThreadContext,
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -1510,6 +1558,7 @@ function buildPrompt(
     },
     instructions: BRIDGE_AGENT_INSTRUCTIONS,
     userInput: userPart,
+    ...(threadContext ? { threadContext } : {}),
     quotedMessages: quotes.map(toPromptQuote),
     interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
     attachments: attachments.map(toPromptAttachment),

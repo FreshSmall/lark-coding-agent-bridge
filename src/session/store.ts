@@ -22,6 +22,19 @@ export class SessionStore {
   private data: SessionMap = {};
   private saving: Promise<void> = Promise.resolve();
   private readonly path: string;
+  /**
+   * Threads whose context has already been injected into a prompt, keyed by
+   * `scope \x1f threadId`.
+   *
+   * Keyed by thread, not by scope: an ordinary group keeps ONE scope for all
+   * of its threads (`scopeFor` only splits by thread for a real 话题群), so a
+   * scope-keyed marker would let the first thread in a group suppress
+   * injection for every later one.
+   *
+   * Deliberately **not** persisted: after a restart the agent process is gone
+   * too, so re-injecting once is the right behavior, not a regression.
+   */
+  private readonly threadContextInjected = new Set<string>();
 
   constructor(path: string = paths.sessionsFile) {
     this.path = path;
@@ -89,7 +102,25 @@ export class SessionStore {
     this.schedulePersist();
   }
 
+  /** Whether this thread's context was already injected for this scope. */
+  hasInjectedThreadContext(chatId: string, threadId: string): boolean {
+    return this.threadContextInjected.has(threadContextKey(chatId, threadId));
+  }
+
+  markThreadContextInjected(chatId: string, threadId: string): void {
+    this.threadContextInjected.add(threadContextKey(chatId, threadId));
+  }
+
   clear(chatId: string): void {
+    // Before the early return below: a run that injected the thread but never
+    // recorded a session id leaves a marker with no entry, and `/new` on that
+    // scope has to clear it anyway. Every thread under this scope resets —
+    // `/new` means "forget the context you were given".
+    const prefix = `${chatId}\x1f`;
+    for (const key of this.threadContextInjected) {
+      if (key.startsWith(prefix)) this.threadContextInjected.delete(key);
+    }
+
     const prev = this.data[chatId];
     if (!prev) return;
     if (prev.idleTimeoutMinutes !== undefined) {
@@ -145,4 +176,8 @@ export class SessionStore {
         log.fail('session', err, { step: 'persist' });
       });
   }
+}
+
+function threadContextKey(chatId: string, threadId: string): string {
+  return `${chatId}\x1f${threadId}`;
 }

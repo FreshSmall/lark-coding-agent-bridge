@@ -31,6 +31,35 @@ export interface BridgePromptQuotedMessage {
   content: string;
 }
 
+/**
+ * The thread the triggering message sits in. Distinct from
+ * {@link BridgePromptQuotedMessage}: a quote is what the user pointed at, a
+ * thread is the surroundings they're speaking in. `total` / `omitted` let the
+ * agent tell "that's all of it" from "there's more I wasn't given".
+ */
+export interface BridgePromptThreadContext {
+  threadId: string;
+  total: number;
+  omitted: number;
+  messages: BridgePromptThreadMessage[];
+  /** Set when the thread couldn't be read; `messages` is then empty. */
+  error?: string;
+}
+
+export interface BridgePromptThreadMessage {
+  messageId: string;
+  position: number;
+  /** The message the thread hangs off — usually what the thread is about. */
+  isHost: boolean;
+  senderId: string;
+  senderName?: string;
+  senderType: 'user' | 'bot';
+  createdAt: string;
+  contentType: string;
+  content: string;
+  truncatedChars?: number;
+}
+
 export interface BridgePromptInteractiveCard {
   messageId?: string;
   content: unknown;
@@ -60,6 +89,7 @@ export interface BuildAgentPromptInput {
   context: BridgePromptContext;
   instructions?: string[];
   userInput: string;
+  threadContext?: BridgePromptThreadContext;
   quotedMessages?: BridgePromptQuotedMessage[];
   interactiveCards?: BridgePromptInteractiveCard[];
   comment?: BridgePromptComment;
@@ -71,6 +101,9 @@ export function buildAgentPrompt(input: BuildAgentPromptInput): string {
     promptSection('bridge_context', input.context),
     input.instructions && input.instructions.length > 0
       ? promptSection('bridge_instructions', input.instructions)
+      : undefined,
+    input.threadContext
+      ? promptSection('thread_context', input.threadContext)
       : undefined,
     input.quotedMessages && input.quotedMessages.length > 0
       ? promptSection('quoted_messages', input.quotedMessages)

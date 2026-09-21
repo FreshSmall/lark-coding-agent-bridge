@@ -39,6 +39,29 @@ describe('bridge system prompt bot collaboration rules', () => {
   });
 });
 
+describe('bridge system prompt thread_context rules', () => {
+  it('documents the thread_context section and its host marker', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('thread_context');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('isHost');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('开启话题的消息');
+  });
+
+  it('explains that omitted means the agent is not seeing everything', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('omitted');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('你看到的不是全部');
+  });
+
+  it('tells the agent to admit it when the thread could not be read', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('读取失败');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('直说你没读到');
+  });
+
+  it('warns that the injection happens once, so it must not ask for a resend', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('该会话的第一轮');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('不要反过来要求用户再发一遍');
+  });
+});
+
 describe('buildBridgeSystemPrompt', () => {
   it('returns the base prompt unchanged when no identity is available', () => {
     expect(buildBridgeSystemPrompt(undefined)).toBe(BRIDGE_SYSTEM_PROMPT);

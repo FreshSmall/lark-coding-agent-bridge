@@ -62,3 +62,97 @@ function tryParseJson(s: string): { user_dsl?: unknown; schema?: unknown } | und
     return undefined;
   }
 }
+
+/**
+ * Element tags whose `content` (or `text.content`) is human-readable copy
+ * rather than layout. Mirrors the SDK's walkCard set plus `div`, which v1
+ * cards use for their text blocks.
+ */
+const TEXT_TAGS = new Set(['markdown', 'plain_text', 'lark_md', 'div', 'text']);
+
+/**
+ * Reduce a CardKit card to the text a human sees.
+ *
+ * Alert cards are ~84% layout by weight (`element_id`, `text_align`,
+ * `background_style`, column scaffolding). Feeding the raw JSON to the agent
+ * spends tokens on nothing and dilutes the part that matters, so callers that
+ * want the *content* of a card use this instead of {@link expandInteractiveCard}.
+ *
+ * Buttons keep their label and href — a "trace 详情" link is a lead the agent
+ * can follow, not decoration. `config.summary` is skipped: it restates the
+ * header. Returns `undefined` when the input isn't a card at all, so callers
+ * can fall back to whatever the SDK flattened.
+ */
+export function extractCardText(rawJsonContent: string | undefined): string | undefined {
+  if (!rawJsonContent) return undefined;
+  const parsed = tryParseJson(rawJsonContent) as Record<string, unknown> | undefined;
+  if (!parsed) return undefined;
+
+  // Webhook v2 dual-publish: the real card hides in `user_dsl`, while
+  // `elements` holds the "please upgrade" downgrade. Prefer the real one.
+  if (typeof parsed.user_dsl === 'string' && parsed.user_dsl.trim()) {
+    return extractCardText(parsed.user_dsl);
+  }
+
+  const out: string[] = [];
+  collectText(parsed.header, out);
+  collectText(parsed.body ?? parsed.elements, out);
+  if (out.length === 0) return undefined;
+  return out.join('\n');
+}
+
+function collectText(node: unknown, out: string[]): void {
+  if (Array.isArray(node)) {
+    for (const child of node) collectText(child, out);
+    return;
+  }
+  if (!node || typeof node !== 'object') return;
+  const el = node as Record<string, unknown>;
+
+  const tag = typeof el.tag === 'string' ? el.tag : undefined;
+
+  if (tag === 'button') {
+    const label = textOf(el.text) ?? textOf(el.content);
+    if (label) {
+      const url = usefulUrl(el.url);
+      out.push(url ? `[${label}](${url})` : label);
+    }
+    return;
+  }
+
+  // A text-bearing node contributes its own copy; anything else is a
+  // container we walk through.
+  if ((tag === undefined || TEXT_TAGS.has(tag)) && typeof el.content === 'string') {
+    if (el.content.trim()) out.push(el.content);
+  }
+  const nested = textOf(el.text) ?? textOf(el.title);
+  if (nested) out.push(nested);
+
+  for (const key of ['elements', 'columns', 'rows', 'actions']) {
+    if (key in el) collectText(el[key], out);
+  }
+}
+
+/** Read `{tag, content}` (or a bare string) out of a text-ish field. */
+function textOf(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() ? value : undefined;
+  if (!value || typeof value !== 'object') return undefined;
+  const content = (value as Record<string, unknown>).content;
+  return typeof content === 'string' && content.trim() ? content : undefined;
+}
+
+/**
+ * Max button href length worth keeping. Past this, the href is almost always
+ * the card's own text percent-encoded into a query param (alert platforms do
+ * this for their "ask AI about this alert" buttons) — the agent already has
+ * that content in readable form, and the link itself leads nowhere it needs
+ * to go. Short hrefs are the opposite: a trace or dashboard link carries ids
+ * the agent can act on.
+ */
+const MAX_BUTTON_URL_CHARS = 300;
+
+function usefulUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value) return undefined;
+  if (value.length > MAX_BUTTON_URL_CHARS) return undefined;
+  return value;
+}

@@ -118,12 +118,14 @@ export interface AppPreferences {
    */
   replyInThreadInGroup?: boolean;
   /**
-   * Whether bridge auto-injects a topic's opening message (the thread root)
-   * as context on the first turn of each topic session. Default true. Only
-   * affects topic-mode groups. Set false to keep prompts minimal — users can
-   * still reply-quote the root by hand.
+   * Whether bridge auto-injects the message a thread hangs off (the thread
+   * root) as context on the first turn of each threaded session. Default
+   * true. Applies wherever a message carries a thread — Feishu topic groups
+   * AND ordinary groups where someone opened a thread under an existing
+   * message (the common alert-bot case). Set false to keep prompts minimal;
+   * users can still reply-quote the root by hand.
    */
-  topicRootContext?: boolean;
+  threadRootContext?: boolean;
   /**
    * How tool-call blocks render in the card. Tri-state:
    *   - `full`     : header + collapsible body (input args + truncated output)
@@ -371,12 +373,13 @@ export function getReplyInThreadInGroup(cfg: AppConfig): boolean {
 }
 
 /**
- * Resolve the topic-root-context preference. Default `true` — the `!== false`
- * check makes older configs without the field inherit the new default. Only
- * affects topic groups; regular groups and p2p never inject a root.
+ * Resolve the thread-root-context preference. Default `true` — the `!== false`
+ * check makes older configs without the field inherit the new default. Gates
+ * injection for any threaded message; p2p never has a thread so it is never
+ * affected.
  */
-export function getTopicRootContext(cfg: AppConfig): boolean {
-  return cfg.preferences?.topicRootContext !== false;
+export function getThreadRootContext(cfg: AppConfig): boolean {
+  return cfg.preferences?.threadRootContext !== false;
 }
 
 /**

@@ -42,7 +42,7 @@ import {
   getRunIdleTimeoutMs,
   getSessionRotateMaxBytes,
   getToolCallDisplay,
-  getTopicRootContext,
+  getThreadRootContext,
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { log, reportMetric, withTrace } from '../core/logger';
@@ -555,6 +555,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     sender: msg.senderId,
     preview,
     resources: msg.resources.length,
+    // Thread shape: whether the event carries the fields thread-root
+    // injection depends on. Feishu omits these on non-threaded messages, and
+    // their absence on a threaded one is the first thing to check when a
+    // thread root fails to be picked up.
+    threadId: msg.threadId,
+    rootId: msg.rootId,
+    replyTo: msg.replyToMessageId,
   });
 
   const accessDecision =
@@ -682,10 +689,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
 
   // Collect the messages to pull in as context. Two sources: what the user
-  // explicitly reply-quoted, and — on a topic's first turn — the thread root,
-  // which is usually the alert / broadcast that opened the topic. Dedup so
-  // the same target only fetches once, and filter out ids already in the
-  // batch (their content is in the prompt anyway).
+  // explicitly reply-quoted, and — on a thread's first turn — the message the
+  // thread hangs off, which is usually the alert / broadcast someone opened
+  // the thread under. Dedup so the same target only fetches once, and filter
+  // out ids already in the batch (their content is in the prompt anyway).
   const batchIds = new Set(batch.map((m) => m.messageId));
   const seenTargets = new Set<string>();
   const quoteTargets: Array<{ id: string; origin: QuoteOrigin }> = [];
@@ -699,10 +706,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // root, `explicit` is the stronger claim about user intent.
   for (const m of batch) pushTarget(replyQuoteTargetForMessage(m), 'explicit');
 
+  // Not gated on chat mode: the common alert case is an ORDINARY group where
+  // a bot posted a card and someone opened a thread under it — `getChatMode`
+  // returns 'group' there, only a true Feishu 话题群 returns 'topic'. Gating
+  // on mode would skip exactly the case this exists for.
+  // `implicitThreadRootTarget` already requires a threadId + rootId, and
+  // `pushTarget` drops ids already in the batch, so a non-threaded message or
+  // a message that IS the root contributes nothing.
   const injectRoot =
-    mode === 'topic' &&
-    getTopicRootContext(controls.cfg) &&
-    !sessions.hasInjectedThreadRoot(scope);
+    getThreadRootContext(controls.cfg) && !sessions.hasInjectedThreadRoot(scope);
   if (injectRoot) pushTarget(implicitThreadRootTarget(firstMsg), 'thread-root');
 
   const quotes: QuotedContext[] = [];

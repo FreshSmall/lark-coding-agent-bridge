@@ -169,8 +169,8 @@ describe('topic message quote handling', () => {
     expect(h.channel.fetchRawMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('skips root injection when topicRootContext is disabled', async () => {
-    const h = await createHarness({ preferences: { topicRootContext: false } });
+  it('skips root injection when threadRootContext is disabled', async () => {
+    const h = await createHarness({ preferences: { threadRootContext: false } });
 
     await startTestBridge(h);
 
@@ -274,7 +274,10 @@ describe('topic message quote handling', () => {
     expect(h.channel.fetchRawMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('never injects a root in a regular group', async () => {
+  // The real alert case: an ORDINARY group (chat mode 'group', not a Feishu
+  // topic group) where an alert bot posted a card and someone opened a thread
+  // under it. The root is the alert, so it has to be injected here too.
+  it('injects the root for a thread inside a regular group', async () => {
     const h = await createHarness({ chatMode: 'group' });
 
     await startTestBridge(h);
@@ -285,14 +288,37 @@ describe('topic message quote handling', () => {
         rootId: 'om_topic_root',
         parentId: 'om_topic_root',
         threadId: 'omt_topic',
-        content: '@Bridge 继续说一下',
+        content: '@Bridge 分析告警',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).toContain('"origin":"thread-root"');
+    expect(prompt).toContain('topic root content');
+    expect(h.channel.fetchRawMessage).toHaveBeenCalledWith(
+      'om_topic_root',
+      expect.objectContaining({ cardContentType: 'user_card_content' }),
+    );
+  });
+
+  it('does not inject anything for a regular group message with no thread', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_flat_group',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        content: '@Bridge 你好',
       }),
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
     expect(prompt).not.toContain('"origin":"thread-root"');
-    expect(h.channel.fetchRawMessage).not.toHaveBeenCalled();
   });
 
   it('keeps regular group reply quotes as quoted context', async () => {
@@ -357,7 +383,7 @@ describe('topic message quote handling', () => {
 interface HarnessOptions {
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
-  /** Merged into profileConfig.preferences — e.g. `{ topicRootContext: false }`. */
+  /** Merged into profileConfig.preferences — e.g. `{ threadRootContext: false }`. */
   preferences?: Record<string, unknown>;
   /** Make the first fetchRawMessage call reject, to exercise the retry path. */
   failFetchOnce?: boolean;

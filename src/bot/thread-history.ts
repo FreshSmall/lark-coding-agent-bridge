@@ -68,6 +68,7 @@ interface MessageListClient {
             container_id: string;
             page_size: number;
             page_token?: string;
+            card_msg_content_type?: string;
           };
         }): Promise<{
           data?: { items?: ApiThreadItem[]; has_more?: boolean; page_token?: string };
@@ -108,6 +109,11 @@ export async function fetchThreadContext(
         container_id_type: 'thread',
         container_id: threadId,
         page_size: PAGE_SIZE,
+        // Without this the API returns the v1 downgrade for CardKit 2.0
+        // cards — an "请升级至最新版本客户端" placeholder instead of the
+        // card. An alert card goes from 238 bytes of nothing to 3.5 KB of
+        // the actual alert.
+        card_msg_content_type: 'user_card_content',
       },
     });
     items = res?.data?.items ?? [];

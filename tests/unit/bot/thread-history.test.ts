@@ -163,6 +163,21 @@ describe('fetchThreadContext', () => {
     expect(ids).toEqual(['om_host', 'om_new']);
   });
 
+  // Without card_msg_content_type the API hands back a v1 downgrade whose
+  // only text is "请升级至最新版本客户端" — the alert body never arrives.
+  it('asks for the original card DSL rather than the v1 downgrade', async () => {
+    const ch = fakeChannel([textItem('om_1', 0, 'hi')]);
+
+    await fetchThreadContext(ch, 'omt_1', BASE);
+
+    const list = (ch as unknown as {
+      rawClient: { im: { v1: { message: { list: { mock: { calls: unknown[][] } } } } } };
+    }).rawClient.im.v1.message.list;
+    expect(list.mock.calls[0]?.[0]).toMatchObject({
+      params: { card_msg_content_type: 'user_card_content' },
+    });
+  });
+
   it('reports a fetch failure instead of pretending the thread is empty', async () => {
     const ch = fakeChannel(() => {
       throw new Error('permission denied');

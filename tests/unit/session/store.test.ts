@@ -17,30 +17,53 @@ describe('thread-context injection marker', () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
-  it('reports a scope as un-injected until it is marked', async () => {
+  it('reports a thread as un-injected until it is marked', async () => {
     const store = new SessionStore(await storePath());
 
-    expect(store.hasInjectedThreadContext('oc_chat:omt_1')).toBe(false);
-    store.markThreadContextInjected('oc_chat:omt_1');
-    expect(store.hasInjectedThreadContext('oc_chat:omt_1')).toBe(true);
+    expect(store.hasInjectedThreadContext('oc_chat', 'omt_1')).toBe(false);
+    store.markThreadContextInjected('oc_chat', 'omt_1');
+    expect(store.hasInjectedThreadContext('oc_chat', 'omt_1')).toBe(true);
   });
 
-  it('keeps the marker scoped — marking one topic does not mark another', async () => {
+  // An ordinary group keeps ONE scope for every thread in it (scopeFor only
+  // splits by thread for real 话题群), so a scope-keyed marker would make the
+  // first thread in a group suppress every later one.
+  it('keys the marker by thread, not just by scope', async () => {
     const store = new SessionStore(await storePath());
 
-    store.markThreadContextInjected('oc_chat:omt_1');
+    store.markThreadContextInjected('oc_chat', 'omt_1');
 
-    expect(store.hasInjectedThreadContext('oc_chat:omt_2')).toBe(false);
+    expect(store.hasInjectedThreadContext('oc_chat', 'omt_2')).toBe(false);
   });
 
-  it('drops the marker on clear so a reset session re-injects', async () => {
+  it('keeps threads of different scopes apart', async () => {
     const store = new SessionStore(await storePath());
-    store.set('oc_chat:omt_1', 'sess-1', '/repo');
-    store.markThreadContextInjected('oc_chat:omt_1');
 
-    store.clear('oc_chat:omt_1');
+    store.markThreadContextInjected('oc_a', 'omt_1');
 
-    expect(store.hasInjectedThreadContext('oc_chat:omt_1')).toBe(false);
+    expect(store.hasInjectedThreadContext('oc_b', 'omt_1')).toBe(false);
+  });
+
+  it('drops every thread marker of a scope on clear', async () => {
+    const store = new SessionStore(await storePath());
+    store.set('oc_chat', 'sess-1', '/repo');
+    store.markThreadContextInjected('oc_chat', 'omt_1');
+    store.markThreadContextInjected('oc_chat', 'omt_2');
+
+    store.clear('oc_chat');
+
+    expect(store.hasInjectedThreadContext('oc_chat', 'omt_1')).toBe(false);
+    expect(store.hasInjectedThreadContext('oc_chat', 'omt_2')).toBe(false);
+  });
+
+  it('leaves other scopes alone on clear', async () => {
+    const store = new SessionStore(await storePath());
+    store.markThreadContextInjected('oc_a', 'omt_1');
+    store.markThreadContextInjected('oc_b', 'omt_1');
+
+    store.clear('oc_a');
+
+    expect(store.hasInjectedThreadContext('oc_b', 'omt_1')).toBe(true);
   });
 
   it('drops the marker on clear even when the scope has no session entry', async () => {
@@ -49,24 +72,24 @@ describe('thread-context injection marker', () => {
     // missing entry, so the marker has to be dropped before that return —
     // otherwise `/new` silently fails to re-inject.
     const store = new SessionStore(await storePath());
-    store.markThreadContextInjected('oc_chat:omt_1');
+    store.markThreadContextInjected('oc_chat', 'omt_1');
 
-    store.clear('oc_chat:omt_1');
+    store.clear('oc_chat');
 
-    expect(store.hasInjectedThreadContext('oc_chat:omt_1')).toBe(false);
+    expect(store.hasInjectedThreadContext('oc_chat', 'omt_1')).toBe(false);
   });
 
   it('does not persist the marker across a reload', async () => {
     const path = await storePath();
     const store = new SessionStore(path);
-    store.set('oc_chat:omt_1', 'sess-1', '/repo');
-    store.markThreadContextInjected('oc_chat:omt_1');
+    store.set('oc_chat', 'sess-1', '/repo');
+    store.markThreadContextInjected('oc_chat', 'omt_1');
     await store.flush();
 
     const reloaded = new SessionStore(path);
     await reloaded.load();
 
-    expect(reloaded.resumeFor('oc_chat:omt_1', '/repo')).toBe('sess-1');
-    expect(reloaded.hasInjectedThreadContext('oc_chat:omt_1')).toBe(false);
+    expect(reloaded.resumeFor('oc_chat', '/repo')).toBe('sess-1');
+    expect(reloaded.hasInjectedThreadContext('oc_chat', 'omt_1')).toBe(false);
   });
 });

@@ -717,7 +717,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // per session: the agent carries it from there, and every path that resets
   // the session (/new, /cd, /ws use, rotation) clears the marker too.
   let threadContext: BridgePromptThreadContext | undefined;
-  if (threadId && getThreadContext(controls.cfg) && !sessions.hasInjectedThreadContext(scope)) {
+  if (
+    threadId &&
+    getThreadContext(controls.cfg) &&
+    !sessions.hasInjectedThreadContext(scope, threadId)
+  ) {
     const fetched = await fetchThreadContext(channel, threadId, {
       selfIds: [channel.botIdentity?.openId, controls.profileConfig.accounts.app.id].filter(
         (id): id is string => Boolean(id),
@@ -740,7 +744,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       error: fetched.error,
     });
     // Only mark once real content landed, so a transient failure retries.
-    if (fetched.messages.length > 0) sessions.markThreadContextInjected(scope);
+    if (fetched.messages.length > 0) sessions.markThreadContextInjected(scope, threadId);
   }
 
   const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity, threadContext);

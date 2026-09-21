@@ -198,10 +198,30 @@ describe('thread context injection', () => {
     await h.channel.handlers.message?.(threadMsg({ messageId: 'om_t1', content: '@Bridge 分析告警' }));
     await waitFor(() => h.agent.runOptions.length === 1);
     await h.channel.handlers.message?.(threadMsg({ messageId: 'om_new', content: '/new' }));
-    await waitFor(() => !h.sessions.hasInjectedThreadContext('oc_topic_chat:omt_topic'));
+    await waitFor(() => !h.sessions.hasInjectedThreadContext('oc_topic_chat:omt_topic', 'omt_topic'));
     await h.channel.handlers.message?.(threadMsg({ messageId: 'om_t2', content: '@Bridge 再看' }));
     await waitFor(() => h.agent.runOptions.length === 2);
 
+    expect(h.agent.runOptions[1]?.prompt ?? '').toContain('<thread_context>');
+    expect(h.channel.rawClient.im.v1.message.list).toHaveBeenCalledTimes(2);
+  });
+
+  // An ordinary group shares one scope across all of its threads, so a
+  // scope-keyed marker used to make the first thread in a group suppress
+  // every later one — the alert in thread #2 never reached the agent.
+  it('injects for a second thread in the same group', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_a', content: '@Bridge 分析告警' }));
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    await h.channel.handlers.message?.(
+      threadMsg({ messageId: 'om_b', content: '@Bridge 这个呢', threadId: 'omt_other' }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2);
+
+    expect(h.agent.runOptions[0]?.prompt ?? '').toContain('<thread_context>');
     expect(h.agent.runOptions[1]?.prompt ?? '').toContain('<thread_context>');
     expect(h.channel.rawClient.im.v1.message.list).toHaveBeenCalledTimes(2);
   });

@@ -40,6 +40,7 @@ interface FakeLarkChannel {
           create: ReturnType<typeof vi.fn>;
           delete: ReturnType<typeof vi.fn>;
         };
+        message: { list: ReturnType<typeof vi.fn> };
       };
     };
   };
@@ -55,6 +56,72 @@ interface FakeLarkChannel {
   stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
 }
 
+
+const SELF_APP_ID = 'cli_test';
+
+/** Mirrors what `im.v1.message.list` returns for a thread: host at -1. */
+const DEFAULT_THREAD_ITEMS = [
+  {
+    message_id: 'om_host',
+    msg_type: 'interactive',
+    thread_message_position: '-1',
+    create_time: '1760000000000',
+    sender: { id: 'cli_alertbot', id_type: 'app_id', sender_type: 'app' },
+    body: {
+      content: JSON.stringify({
+        body: {
+          direction: 'vertical',
+          elements: [
+            {
+              tag: 'markdown',
+              content: '应用 X 普通预警',
+              element_id: '_2',
+              background_style: 'grey-100',
+            },
+          ],
+        },
+      }),
+    },
+  },
+  {
+    message_id: 'om_peer',
+    msg_type: 'text',
+    thread_message_position: '0',
+    create_time: '1760000001000',
+    sender: { id: 'ou_peer', id_type: 'open_id', sender_type: 'user' },
+    body: { content: JSON.stringify({ text: '别人的补充' }) },
+  },
+  {
+    message_id: 'om_selfreply',
+    msg_type: 'interactive',
+    thread_message_position: '1',
+    create_time: '1760000002000',
+    sender: { id: SELF_APP_ID, id_type: 'app_id', sender_type: 'app' },
+    body: {
+      content: JSON.stringify({
+        body: { elements: [{ tag: 'markdown', content: '我之前的回复' }] },
+      }),
+    },
+  },
+];
+
+/** A message inside the alert thread; `threadId: undefined` makes it flat. */
+function threadMsg(input: {
+  messageId: string;
+  content: string;
+  threadId?: string | undefined;
+  parentId?: string;
+}): NormalizedMessage {
+  const threadId = 'threadId' in input ? input.threadId : 'omt_topic';
+  return message({
+    messageId: input.messageId,
+    rootId: 'om_host',
+    parentId: input.parentId ?? 'om_host',
+    ...(threadId ? { threadId } : {}),
+    content: input.content,
+  });
+}
+
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
@@ -64,329 +131,160 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
-describe('topic message quote handling', () => {
-  it('injects the topic root as implicit context on the first turn', async () => {
+describe('thread context injection', () => {
+  it('injects the whole thread, host first, on the first turn', async () => {
     const h = await createHarness();
 
     await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_direct_at',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 分析一下这个告警',
-      }),
-    );
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_at', content: '@Bridge 分析告警' }));
     await waitFor(() => h.agent.runOptions.length === 1);
 
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('"threadId":"omt_topic"');
-    expect(prompt).toContain('<quoted_messages>');
-    expect(prompt).toContain('topic root content');
-    expect(prompt).toContain('"origin":"thread-root"');
-    expect(h.channel.fetchRawMessage).toHaveBeenCalledWith(
-      'om_topic_root',
-      expect.objectContaining({ cardContentType: 'user_card_content' }),
+    expect(prompt).toContain('<thread_context>');
+    expect(prompt).toContain('应用 X 普通预警');
+    expect(prompt).toContain('"isHost":true');
+    expect(h.channel.rawClient.im.v1.message.list).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          container_id_type: 'thread',
+          container_id: 'omt_topic',
+        }),
+      }),
     );
   });
 
-  it('does not re-inject the topic root on later turns of the same session', async () => {
+  it('extracts card text rather than dumping the card JSON', async () => {
     const h = await createHarness();
 
     await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_turn_1',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 分析一下这个告警',
-      }),
-    );
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_at', content: '@Bridge 分析告警' }));
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_turn_2',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 那影响面呢',
-      }),
-    );
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).toContain('应用 X 普通预警');
+    expect(prompt).not.toContain('background_style');
+    expect(prompt).not.toContain('element_id');
+  });
+
+  it("leaves out the bridge bot's own replies", async () => {
+    const h = await createHarness();
+
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_at', content: '@Bridge 分析告警' }));
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).not.toContain('我之前的回复');
+    expect(prompt).toContain('别人的补充');
+  });
+
+  it('does not re-fetch the thread on later turns of the same session', async () => {
+    const h = await createHarness();
+
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_t1', content: '@Bridge 分析告警' }));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_t2', content: '@Bridge 影响面呢' }));
     await waitFor(() => h.agent.runOptions.length === 2);
 
-    const second = h.agent.runOptions[1]?.prompt ?? '';
-    expect(second).not.toContain('"origin":"thread-root"');
-    expect(second).not.toContain('topic root content');
-    expect(h.channel.fetchRawMessage).toHaveBeenCalledTimes(1);
+    expect(h.agent.runOptions[1]?.prompt ?? '').not.toContain('<thread_context>');
+    expect(h.channel.rawClient.im.v1.message.list).toHaveBeenCalledTimes(1);
   });
 
-  it('re-injects the topic root after /new resets the session', async () => {
+  it('re-fetches after /new resets the session', async () => {
     const h = await createHarness();
 
     await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_before_new',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 分析一下这个告警',
-      }),
-    );
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_t1', content: '@Bridge 分析告警' }));
     await waitFor(() => h.agent.runOptions.length === 1);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_new_cmd',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '/new',
-      }),
-    );
-    await waitFor(() => !h.sessions.hasInjectedThreadRoot('oc_topic_chat:omt_topic'));
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_after_new',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 再看一遍',
-      }),
-    );
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_new', content: '/new' }));
+    await waitFor(() => !h.sessions.hasInjectedThreadContext('oc_topic_chat:omt_topic'));
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_t2', content: '@Bridge 再看' }));
     await waitFor(() => h.agent.runOptions.length === 2);
 
-    const second = h.agent.runOptions[1]?.prompt ?? '';
-    expect(second).toContain('"origin":"thread-root"');
-    expect(second).toContain('topic root content');
-    expect(h.channel.fetchRawMessage).toHaveBeenCalledTimes(2);
+    expect(h.agent.runOptions[1]?.prompt ?? '').toContain('<thread_context>');
+    expect(h.channel.rawClient.im.v1.message.list).toHaveBeenCalledTimes(2);
   });
 
-  it('skips root injection when threadRootContext is disabled', async () => {
-    const h = await createHarness({ preferences: { threadRootContext: false } });
+  it('skips injection when threadContext is disabled', async () => {
+    const h = await createHarness({ preferences: { threadContext: false } });
 
     await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_disabled',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 继续说一下',
-      }),
-    );
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_at', content: '@Bridge 分析告警' }));
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).not.toContain('<quoted_messages>');
-    expect(prompt).not.toContain('topic root content');
-    expect(h.channel.fetchRawMessage).not.toHaveBeenCalled();
+    expect(h.agent.runOptions[0]?.prompt ?? '').not.toContain('<thread_context>');
+    expect(h.channel.rawClient.im.v1.message.list).not.toHaveBeenCalled();
   });
 
-  it('carries both the explicit quote and the implicit root on the first turn', async () => {
-    const h = await createHarness({
-      quotedMessages: {
-        om_topic_root: 'topic root content',
-        om_topic_parent: 'topic parent content',
-      },
-    });
-
-    await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_both',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_parent',
-        threadId: 'omt_topic',
-        content: '@Bridge 看父消息',
-      }),
-    );
-    await waitFor(() => h.agent.runOptions.length === 1);
-
-    const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('topic parent content');
-    expect(prompt).toContain('"origin":"explicit"');
-    expect(prompt).toContain('topic root content');
-    expect(prompt).toContain('"origin":"thread-root"');
-  });
-
-  it('does not inject when the triggering message IS the topic root', async () => {
+  it('does not inject for a message outside any thread', async () => {
     const h = await createHarness();
 
     await startTestBridge(h);
-
     await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_topic_root',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 开个话题问你',
-      }),
+      threadMsg({ messageId: 'om_flat', content: '@Bridge 你好', threadId: undefined }),
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).not.toContain('<quoted_messages>');
-    expect(h.channel.fetchRawMessage).not.toHaveBeenCalled();
+    expect(h.agent.runOptions[0]?.prompt ?? '').not.toContain('<thread_context>');
+    expect(h.channel.rawClient.im.v1.message.list).not.toHaveBeenCalled();
   });
 
-  it('retries root injection on the next turn when the fetch fails', async () => {
-    const h = await createHarness({ failFetchOnce: true });
+  //保真优先：拉取失败要让 agent 看见缺口，而不是当作话题是空的。
+  it('reports a fetch failure in the prompt and retries next turn', async () => {
+    const h = await createHarness({ failListOnce: true });
 
     await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_fetch_fail',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 分析一下这个告警',
-      }),
-    );
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_t1', content: '@Bridge 分析告警' }));
     await waitFor(() => h.agent.runOptions.length === 1);
-    expect(h.agent.runOptions[0]?.prompt ?? '').not.toContain('topic root content');
 
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_fetch_retry',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 再试一次',
-      }),
-    );
+    const first = h.agent.runOptions[0]?.prompt ?? '';
+    expect(first).toContain('<thread_context>');
+    expect(first).toContain('thread list blew up');
+
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_t2', content: '@Bridge 再试' }));
     await waitFor(() => h.agent.runOptions.length === 2);
 
-    const second = h.agent.runOptions[1]?.prompt ?? '';
-    expect(second).toContain('topic root content');
-    expect(second).toContain('"origin":"thread-root"');
-    expect(h.channel.fetchRawMessage).toHaveBeenCalledTimes(2);
+    expect(h.agent.runOptions[1]?.prompt ?? '').toContain('应用 X 普通预警');
+    expect(h.channel.rawClient.im.v1.message.list).toHaveBeenCalledTimes(2);
   });
 
-  // The real alert case: an ORDINARY group (chat mode 'group', not a Feishu
-  // topic group) where an alert bot posted a card and someone opened a thread
-  // under it. The root is the alert, so it has to be injected here too.
-  it('injects the root for a thread inside a regular group', async () => {
-    const h = await createHarness({ chatMode: 'group' });
+  it('keeps an explicit reply quote in quoted_messages, with no origin field', async () => {
+    const h = await createHarness({ quotedMessages: { om_other: 'explicitly quoted' } });
 
     await startTestBridge(h);
-
     await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_group_thread',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        threadId: 'omt_topic',
-        content: '@Bridge 分析告警',
-      }),
-    );
-    await waitFor(() => h.agent.runOptions.length === 1);
-
-    const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('"origin":"thread-root"');
-    expect(prompt).toContain('topic root content');
-    expect(h.channel.fetchRawMessage).toHaveBeenCalledWith(
-      'om_topic_root',
-      expect.objectContaining({ cardContentType: 'user_card_content' }),
-    );
-  });
-
-  it('does not inject anything for a regular group message with no thread', async () => {
-    const h = await createHarness({ chatMode: 'group' });
-
-    await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_flat_group',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_root',
-        content: '@Bridge 你好',
-      }),
-    );
-    await waitFor(() => h.agent.runOptions.length === 1);
-
-    const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).not.toContain('"origin":"thread-root"');
-  });
-
-  it('keeps regular group reply quotes as quoted context', async () => {
-    const h = await createHarness({
-      chatMode: 'group',
-      quotedMessages: {
-        om_quote_target: 'regular quoted content',
-      },
-    });
-
-    await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_group_reply',
-        rootId: 'om_quote_target',
-        parentId: 'om_quote_target',
-        content: '@Bridge 看这条',
-      }),
+      threadMsg({ messageId: 'om_at', content: '@Bridge 看这条', parentId: 'om_other' }),
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
     expect(prompt).toContain('<quoted_messages>');
-    expect(prompt).toContain('regular quoted content');
-    expect(h.channel.fetchRawMessage).toHaveBeenCalledWith(
-      'om_quote_target',
-      expect.objectContaining({ cardContentType: 'user_card_content' }),
-    );
+    expect(prompt).toContain('explicitly quoted');
+    expect(prompt).not.toContain('origin');
   });
 
-  it('keeps non-root reply quotes in topic chats', async () => {
-    const h = await createHarness({
-      quotedMessages: {
-        om_topic_parent: 'topic parent content',
-      },
-    });
+  it('does not quote the thread host as if the user had pointed at it', async () => {
+    const h = await createHarness();
 
     await startTestBridge(h);
-
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_topic_reply',
-        rootId: 'om_topic_root',
-        parentId: 'om_topic_parent',
-        threadId: 'omt_topic',
-        content: '@Bridge 看父消息',
-      }),
-    );
+    await h.channel.handlers.message?.(threadMsg({ messageId: 'om_at', content: '@Bridge 分析告警' }));
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('<quoted_messages>');
-    expect(prompt).toContain('topic parent content');
-    expect(h.channel.fetchRawMessage).toHaveBeenCalledWith(
-      'om_topic_parent',
-      expect.objectContaining({ cardContentType: 'user_card_content' }),
-    );
+    // host 走 thread_context，不该同时出现在 quoted_messages 里
+    expect(h.agent.runOptions[0]?.prompt ?? '').not.toContain('<quoted_messages>');
   });
 });
 
 interface HarnessOptions {
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
-  /** Merged into profileConfig.preferences — e.g. `{ threadRootContext: false }`. */
+  /** Merged into profileConfig.preferences — e.g. `{ threadContext: false }`. */
   preferences?: Record<string, unknown>;
-  /** Make the first fetchRawMessage call reject, to exercise the retry path. */
-  failFetchOnce?: boolean;
+  /** Make the first thread listing reject, to exercise the retry path. */
+  failListOnce?: boolean;
+  /** Override the fake thread listing. */
+  threadItems?: unknown[];
 }
 
 async function createHarness(options: HarnessOptions = {}): Promise<{
@@ -477,7 +375,15 @@ function createFakeLarkChannel(
   const quotedMessages = options.quotedMessages ?? {
     om_topic_root: 'topic root content',
   };
-  let fetchFailed = false;
+  let listFailed = false;
+  const threadItems = options.threadItems ?? DEFAULT_THREAD_ITEMS;
+  const messageList = vi.fn(async () => {
+    if (options.failListOnce && !listFailed) {
+      listFailed = true;
+      throw new Error('thread list blew up');
+    }
+    return { data: { items: threadItems, has_more: false } };
+  });
   return {
     handlers,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
@@ -489,17 +395,13 @@ function createFakeLarkChannel(
             create: vi.fn(async () => ({ data: { reaction_id: 'reaction_1' } })),
             delete: vi.fn(async () => ({})),
           },
+          message: { list: messageList },
         },
       },
     },
     getAppInfo: vi.fn(async () => ({ ownerId: 'ou_owner' })),
     listChats: vi.fn(async () => []),
-    fetchRawMessage: vi.fn(async (messageId: string) => {
-      if (options.failFetchOnce && !fetchFailed) {
-        fetchFailed = true;
-        throw new Error('simulated feishu failure');
-      }
-      return [
+    fetchRawMessage: vi.fn(async (messageId: string) => [
       {
         message_id: messageId,
         msg_type: 'text',
@@ -511,8 +413,7 @@ function createFakeLarkChannel(
         create_time: '1760000000000',
         sender: { id: 'ou_quote_sender' },
       },
-      ];
-    }),
+    ]),
     on(nextHandlers) {
       Object.assign(handlers, nextHandlers);
     },

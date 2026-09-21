@@ -37,24 +37,3 @@ export function replyQuoteTargetForMessage(
   }
   return replyTo;
 }
-
-/**
- * Resolve the thread root to inject as *implicit* context, or `undefined`
- * when there's nothing to inject.
- *
- * Distinct from {@link replyQuoteTargetForMessage}, which resolves what the
- * user *intentionally* quoted. A topic's root is structure — but when the
- * topic was opened by an alert card and the user simply @-mentions the bot
- * inside it, that structure IS the context the user means. Callers inject it
- * once per session and let the agent session carry it from there.
- *
- * Returns `undefined` when the message isn't in a thread, has no root, or IS
- * the root itself (its content is already in the batch).
- */
-export function implicitThreadRootTarget(
-  msg: NormalizedMessage,
-): string | undefined {
-  if (!msg.threadId || !msg.rootId) return undefined;
-  if (msg.rootId === msg.messageId) return undefined;
-  return msg.rootId;
-}

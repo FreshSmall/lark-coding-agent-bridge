@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   getReplyInThreadInGroup,
-  getThreadRootContext,
+  getThreadContext,
+  getThreadContextMaxChars,
+  getThreadContextMaxMessageChars,
   getTurnSilenceTimeoutMs,
   getTurnMaxMs,
   getSessionRotateMaxBytes,
@@ -36,17 +38,34 @@ describe('getReplyInThreadInGroup', () => {
   });
 });
 
-describe('getThreadRootContext', () => {
+describe('getThreadContext', () => {
   it('defaults to true when unset', () => {
-    expect(getThreadRootContext(cfgPrefs({}))).toBe(true);
+    expect(getThreadContext(cfgPrefs({}))).toBe(true);
   });
 
   it('returns false only when explicitly false', () => {
-    expect(getThreadRootContext(cfgPrefs({ threadRootContext: false }))).toBe(false);
+    expect(getThreadContext(cfgPrefs({ threadContext: false }))).toBe(false);
   });
 
   it('returns true when explicitly true', () => {
-    expect(getThreadRootContext(cfgPrefs({ threadRootContext: true }))).toBe(true);
+    expect(getThreadContext(cfgPrefs({ threadContext: true }))).toBe(true);
+  });
+});
+
+describe('thread context budgets', () => {
+  it('default to 20000 total and 4000 per message', () => {
+    expect(getThreadContextMaxChars(cfgPrefs({}))).toBe(20_000);
+    expect(getThreadContextMaxMessageChars(cfgPrefs({}))).toBe(4_000);
+  });
+
+  it('clamp out-of-range values instead of trusting them', () => {
+    expect(getThreadContextMaxChars(cfgPrefs({ threadContextMaxChars: 10 }))).toBe(1_000);
+    expect(getThreadContextMaxChars(cfgPrefs({ threadContextMaxChars: 9_999_999 }))).toBe(200_000);
+    expect(getThreadContextMaxMessageChars(cfgPrefs({ threadContextMaxMessageChars: 1 }))).toBe(200);
+  });
+
+  it('honor a sane override', () => {
+    expect(getThreadContextMaxChars(cfgPrefs({ threadContextMaxChars: 5_000 }))).toBe(5_000);
   });
 });
 

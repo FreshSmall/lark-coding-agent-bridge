@@ -125,7 +125,17 @@ export interface AppPreferences {
    * message (the common alert-bot case). Set false to keep prompts minimal;
    * users can still reply-quote the root by hand.
    */
-  threadRootContext?: boolean;
+  threadContext?: boolean;
+  /**
+   * Character budget for the whole `thread_context` block. The thread host
+   * is exempt — it's the message the thread is about. Default 20000.
+   */
+  threadContextMaxChars?: number;
+  /**
+   * Per-message cap inside `thread_context`, so one pasted stack trace can't
+   * eat the whole budget. Default 4000.
+   */
+  threadContextMaxMessageChars?: number;
   /**
    * How tool-call blocks render in the card. Tri-state:
    *   - `full`     : header + collapsible body (input args + truncated output)
@@ -373,13 +383,27 @@ export function getReplyInThreadInGroup(cfg: AppConfig): boolean {
 }
 
 /**
- * Resolve the thread-root-context preference. Default `true` — the `!== false`
+ * Resolve the thread-context preference. Default `true` — the `!== false`
  * check makes older configs without the field inherit the new default. Gates
  * injection for any threaded message; p2p never has a thread so it is never
  * affected.
  */
-export function getThreadRootContext(cfg: AppConfig): boolean {
-  return cfg.preferences?.threadRootContext !== false;
+export function getThreadContext(cfg: AppConfig): boolean {
+  return cfg.preferences?.threadContext !== false;
+}
+
+/** Total character budget for `thread_context`. Clamps to [1000, 200000]. */
+export function getThreadContextMaxChars(cfg: AppConfig): number {
+  const raw = cfg.preferences?.threadContextMaxChars;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 20_000;
+  return Math.min(200_000, Math.max(1_000, Math.floor(raw)));
+}
+
+/** Per-message cap inside `thread_context`. Clamps to [200, 50000]. */
+export function getThreadContextMaxMessageChars(cfg: AppConfig): number {
+  const raw = cfg.preferences?.threadContextMaxMessageChars;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 4_000;
+  return Math.min(50_000, Math.max(200, Math.floor(raw)));
 }
 
 /**

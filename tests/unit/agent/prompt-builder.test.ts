@@ -140,3 +140,94 @@ function readSection(prompt: string, tag: string): unknown {
 function count(input: string, needle: string): number {
   return input.split(needle).length - 1;
 }
+
+describe('thread_context section', () => {
+  const base = {
+    context: {
+      chatId: 'oc_group',
+      chatType: 'group',
+      senderId: 'ou_user',
+      threadId: 'omt_1',
+      source: 'im' as const,
+    },
+    userInput: '分析告警',
+  };
+
+  it('is omitted when there is no thread', () => {
+    expect(buildAgentPrompt(base)).not.toContain('<thread_context>');
+  });
+
+  it('carries the thread messages with counts and the host flag', () => {
+    const prompt = buildAgentPrompt({
+      ...base,
+      threadContext: {
+        threadId: 'omt_1',
+        total: 3,
+        omitted: 1,
+        messages: [
+          {
+            messageId: 'om_host',
+            position: -1,
+            isHost: true,
+            senderId: 'cli_alert',
+            senderType: 'bot',
+            createdAt: '2026-09-21T04:11:31.570Z',
+            contentType: 'interactive',
+            content: '应用 X 普通预警',
+          },
+          {
+            messageId: 'om_2',
+            position: 0,
+            isHost: false,
+            senderId: 'ou_user',
+            senderType: 'user',
+            createdAt: '2026-09-21T06:30:49.773Z',
+            contentType: 'text',
+            content: '这个怎么看',
+          },
+        ],
+      },
+    });
+
+    expect(prompt).toContain('<thread_context>');
+    expect(prompt).toContain('应用 X 普通预警');
+    expect(prompt).toContain('"isHost":true');
+    expect(prompt).toContain('"total":3');
+    expect(prompt).toContain('"omitted":1');
+  });
+
+  it('surfaces a fetch error instead of an empty-looking section', () => {
+    const prompt = buildAgentPrompt({
+      ...base,
+      threadContext: {
+        threadId: 'omt_1',
+        total: 0,
+        omitted: 0,
+        messages: [],
+        error: 'permission denied',
+      },
+    });
+
+    expect(prompt).toContain('<thread_context>');
+    expect(prompt).toContain('permission denied');
+  });
+
+  it('places thread_context before quoted_messages', () => {
+    const prompt = buildAgentPrompt({
+      ...base,
+      threadContext: { threadId: 'omt_1', total: 1, omitted: 0, messages: [
+        { messageId: 'om_host', position: -1, isHost: true, senderId: 'cli_a',
+          senderType: 'bot', createdAt: '', contentType: 'text', content: 'host' },
+      ] },
+      quotedMessages: [
+        { messageId: 'om_q', senderId: 'ou_q', rawContentType: 'text', content: 'quoted' },
+      ],
+    });
+
+    const threadAt = prompt.indexOf('<thread_context>');
+    const quotedAt = prompt.indexOf('<quoted_messages>');
+    expect(threadAt).toBeGreaterThan(-1);
+    expect(quotedAt).toBeGreaterThan(-1);
+    expect(threadAt).toBeLessThan(quotedAt);
+  });
+});

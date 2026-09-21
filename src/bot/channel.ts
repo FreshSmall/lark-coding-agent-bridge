@@ -11,6 +11,7 @@ import {
   type BridgePromptInteractiveCard,
   type BridgePromptMention,
   type BridgePromptQuotedMessage,
+  type BridgePromptThreadContext,
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { AskQuestionFlow } from './ask-question-flow';
@@ -42,7 +43,9 @@ import {
   getRunIdleTimeoutMs,
   getSessionRotateMaxBytes,
   getToolCallDisplay,
-  getThreadRootContext,
+  getThreadContext,
+  getThreadContextMaxChars,
+  getThreadContextMaxMessageChars,
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { log, reportMetric, withTrace } from '../core/logger';
@@ -60,18 +63,15 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
-import {
-  shouldReplyInThread,
-  replyQuoteTargetForMessage,
-  implicitThreadRootTarget,
-} from './thread-policy';
+import { shouldReplyInThread, replyQuoteTargetForMessage } from './thread-policy';
 import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
-import { fetchQuotedContext, type QuotedContext, type QuoteOrigin } from './quote';
+import { fetchQuotedContext, type QuotedContext } from './quote';
+import { fetchThreadContext } from './thread-history';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
@@ -555,10 +555,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     sender: msg.senderId,
     preview,
     resources: msg.resources.length,
-    // Thread shape: whether the event carries the fields thread-root
+    // Thread shape: whether the event carries the fields thread-context
     // injection depends on. Feishu omits these on non-threaded messages, and
     // their absence on a threaded one is the first thing to check when a
-    // thread root fails to be picked up.
+    // thread fails to be picked up.
     threadId: msg.threadId,
     rootId: msg.rootId,
     replyTo: msg.replyToMessageId,
@@ -688,57 +688,62 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  // Collect the messages to pull in as context. Two sources: what the user
-  // explicitly reply-quoted, and — on a thread's first turn — the message the
-  // thread hangs off, which is usually the alert / broadcast someone opened
-  // the thread under. Dedup so the same target only fetches once, and filter
-  // out ids already in the batch (their content is in the prompt anyway).
+  // Two independent context sources, kept in separate prompt sections because
+  // they mean different things to the agent: a quote is what the user pointed
+  // at, a thread is the surroundings they're speaking in.
   const batchIds = new Set(batch.map((m) => m.messageId));
-  const seenTargets = new Set<string>();
-  const quoteTargets: Array<{ id: string; origin: QuoteOrigin }> = [];
-  const pushTarget = (id: string | undefined, origin: QuoteOrigin): void => {
-    if (!id || batchIds.has(id) || seenTargets.has(id)) return;
-    seenTargets.add(id);
-    quoteTargets.push({ id, origin });
-  };
-
-  // Explicit quotes go first: when the same id is both quoted and the thread
-  // root, `explicit` is the stronger claim about user intent.
-  for (const m of batch) pushTarget(replyQuoteTargetForMessage(m), 'explicit');
-
-  // Not gated on chat mode: the common alert case is an ORDINARY group where
-  // a bot posted a card and someone opened a thread under it — `getChatMode`
-  // returns 'group' there, only a true Feishu 话题群 returns 'topic'. Gating
-  // on mode would skip exactly the case this exists for.
-  // `implicitThreadRootTarget` already requires a threadId + rootId, and
-  // `pushTarget` drops ids already in the batch, so a non-threaded message or
-  // a message that IS the root contributes nothing.
-  const injectRoot =
-    getThreadRootContext(controls.cfg) && !sessions.hasInjectedThreadRoot(scope);
-  if (injectRoot) pushTarget(implicitThreadRootTarget(firstMsg), 'thread-root');
-
+  const quoteTargets = [
+    ...new Set(
+      batch
+        .map((m) => replyQuoteTargetForMessage(m))
+        .filter((id): id is string => Boolean(id) && !batchIds.has(id!)),
+    ),
+  ];
   const quotes: QuotedContext[] = [];
-  for (const target of quoteTargets) {
-    const q = await fetchQuotedContext(channel, target.id);
+  for (const targetId of quoteTargets) {
+    const q = await fetchQuotedContext(channel, targetId);
     if (q) {
-      quotes.push({ ...q, origin: target.origin });
+      quotes.push(q);
       log.info('quote', 'fetched', {
-        messageId: target.id,
-        origin: target.origin,
+        messageId: targetId,
         type: q.rawContentType,
         contentChars: q.content.length,
       });
     }
   }
 
-  // Mark only after the content actually landed: fetchQuotedContext swallows
-  // API failures, and marking on a failed fetch would lose this topic's root
-  // for the rest of the session with nothing to show for it.
-  if (injectRoot && quotes.some((q) => q.origin === 'thread-root')) {
-    sessions.markThreadRootInjected(scope);
+  // The thread the message sits in — for an alert thread this is where the
+  // alert card itself lives (Feishu returns it at position -1). Fetched once
+  // per session: the agent carries it from there, and every path that resets
+  // the session (/new, /cd, /ws use, rotation) clears the marker too.
+  let threadContext: BridgePromptThreadContext | undefined;
+  if (threadId && getThreadContext(controls.cfg) && !sessions.hasInjectedThreadContext(scope)) {
+    const fetched = await fetchThreadContext(channel, threadId, {
+      selfIds: [channel.botIdentity?.openId, controls.profileConfig.accounts.app.id].filter(
+        (id): id is string => Boolean(id),
+      ),
+      excludeMessageIds: [...batchIds],
+      maxTotalChars: getThreadContextMaxChars(controls.cfg),
+      maxMessageChars: getThreadContextMaxMessageChars(controls.cfg),
+    });
+    // Inject on failure too — an agent that can't tell "empty thread" from
+    // "couldn't read the thread" will answer confidently from nothing.
+    if (fetched.messages.length > 0 || fetched.error) {
+      threadContext = fetched;
+    }
+    log.info('thread', 'context', {
+      threadId,
+      total: fetched.total,
+      included: fetched.messages.length,
+      omitted: fetched.omitted,
+      chars: fetched.messages.reduce((n, m) => n + m.content.length, 0),
+      error: fetched.error,
+    });
+    // Only mark once real content landed, so a transient failure retries.
+    if (fetched.messages.length > 0) sessions.markThreadContextInjected(scope);
   }
 
-  const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity);
+  const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity, threadContext);
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
 
   // Thread the reply when policy says so: topic groups (when the message is
@@ -1507,6 +1512,7 @@ function buildPrompt(
   attachments: LocalAttachment[],
   quotes: QuotedContext[] = [],
   botIdentity?: { openId: string; name?: string },
+  threadContext?: BridgePromptThreadContext,
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -1548,6 +1554,7 @@ function buildPrompt(
     },
     instructions: BRIDGE_AGENT_INSTRUCTIONS,
     userInput: userPart,
+    ...(threadContext ? { threadContext } : {}),
     quotedMessages: quotes.map(toPromptQuote),
     interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
     attachments: attachments.map(toPromptAttachment),
@@ -1615,7 +1622,6 @@ function toPromptQuote(q: QuotedContext): BridgePromptQuotedMessage {
     senderId: q.senderId,
     ...(q.senderName ? { senderName: q.senderName } : {}),
     ...(q.createdAt ? { createdAt: q.createdAt } : {}),
-    ...(q.origin ? { origin: q.origin } : {}),
     rawContentType: q.rawContentType,
     content: q.content,
   };

@@ -39,20 +39,25 @@ describe('bridge system prompt bot collaboration rules', () => {
   });
 });
 
-describe('bridge system prompt quote origin rules', () => {
-  it('documents both quote origins', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('origin');
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('explicit');
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('thread-root');
+describe('bridge system prompt thread_context rules', () => {
+  it('documents the thread_context section and its host marker', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('thread_context');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('isHost');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('开启话题的消息');
   });
 
-  it('explains that a thread-root quote is bridge-injected, not user-quoted', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('话题首条消息');
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('用户没有显式引用');
+  it('explains that omitted means the agent is not seeing everything', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('omitted');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('你看到的不是全部');
   });
 
-  it('warns that the injection happens once, so the agent must not ask for a resend', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('只在');
+  it('tells the agent to admit it when the thread could not be read', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('读取失败');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('直说你没读到');
+  });
+
+  it('warns that the injection happens once, so it must not ask for a resend', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('该会话的第一轮');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('不要反过来要求用户再发一遍');
   });
 });

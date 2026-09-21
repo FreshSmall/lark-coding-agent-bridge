@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   getReplyInThreadInGroup,
+  getTopicRootContext,
   getTurnSilenceTimeoutMs,
   getTurnMaxMs,
   getSessionRotateMaxBytes,
@@ -32,6 +33,20 @@ describe('getReplyInThreadInGroup', () => {
 
   it('returns true when explicitly true', () => {
     expect(getReplyInThreadInGroup(cfgWith(true))).toBe(true);
+  });
+});
+
+describe('getTopicRootContext', () => {
+  it('defaults to true when unset', () => {
+    expect(getTopicRootContext(cfgPrefs({}))).toBe(true);
+  });
+
+  it('returns false only when explicitly false', () => {
+    expect(getTopicRootContext(cfgPrefs({ topicRootContext: false }))).toBe(false);
+  });
+
+  it('returns true when explicitly true', () => {
+    expect(getTopicRootContext(cfgPrefs({ topicRootContext: true }))).toBe(true);
   });
 });
 

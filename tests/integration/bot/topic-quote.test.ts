@@ -65,7 +65,7 @@ afterEach(async () => {
 });
 
 describe('topic message quote handling', () => {
-  it('does not quote the topic root when a user directly mentions the bot inside the topic', async () => {
+  it('injects the topic root as implicit context on the first turn', async () => {
     const h = await createHarness();
 
     await startTestBridge(h);
@@ -76,16 +76,222 @@ describe('topic message quote handling', () => {
         rootId: 'om_topic_root',
         parentId: 'om_topic_root',
         threadId: 'omt_topic',
+        content: '@Bridge 分析一下这个告警',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).toContain('"threadId":"omt_topic"');
+    expect(prompt).toContain('<quoted_messages>');
+    expect(prompt).toContain('topic root content');
+    expect(prompt).toContain('"origin":"thread-root"');
+    expect(h.channel.fetchRawMessage).toHaveBeenCalledWith(
+      'om_topic_root',
+      expect.objectContaining({ cardContentType: 'user_card_content' }),
+    );
+  });
+
+  it('does not re-inject the topic root on later turns of the same session', async () => {
+    const h = await createHarness();
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_turn_1',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 分析一下这个告警',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_turn_2',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 那影响面呢',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2);
+
+    const second = h.agent.runOptions[1]?.prompt ?? '';
+    expect(second).not.toContain('"origin":"thread-root"');
+    expect(second).not.toContain('topic root content');
+    expect(h.channel.fetchRawMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-injects the topic root after /new resets the session', async () => {
+    const h = await createHarness();
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_before_new',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 分析一下这个告警',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_new_cmd',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '/new',
+      }),
+    );
+    await waitFor(() => !h.sessions.hasInjectedThreadRoot('oc_topic_chat:omt_topic'));
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_after_new',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 再看一遍',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2);
+
+    const second = h.agent.runOptions[1]?.prompt ?? '';
+    expect(second).toContain('"origin":"thread-root"');
+    expect(second).toContain('topic root content');
+    expect(h.channel.fetchRawMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips root injection when topicRootContext is disabled', async () => {
+    const h = await createHarness({ preferences: { topicRootContext: false } });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_disabled',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
         content: '@Bridge 继续说一下',
       }),
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    expect(h.agent.runOptions).toHaveLength(1);
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).toContain('"threadId":"omt_topic"');
     expect(prompt).not.toContain('<quoted_messages>');
     expect(prompt).not.toContain('topic root content');
+    expect(h.channel.fetchRawMessage).not.toHaveBeenCalled();
+  });
+
+  it('carries both the explicit quote and the implicit root on the first turn', async () => {
+    const h = await createHarness({
+      quotedMessages: {
+        om_topic_root: 'topic root content',
+        om_topic_parent: 'topic parent content',
+      },
+    });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_both',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_parent',
+        threadId: 'omt_topic',
+        content: '@Bridge 看父消息',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).toContain('topic parent content');
+    expect(prompt).toContain('"origin":"explicit"');
+    expect(prompt).toContain('topic root content');
+    expect(prompt).toContain('"origin":"thread-root"');
+  });
+
+  it('does not inject when the triggering message IS the topic root', async () => {
+    const h = await createHarness();
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_topic_root',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 开个话题问你',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).not.toContain('<quoted_messages>');
+    expect(h.channel.fetchRawMessage).not.toHaveBeenCalled();
+  });
+
+  it('retries root injection on the next turn when the fetch fails', async () => {
+    const h = await createHarness({ failFetchOnce: true });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_fetch_fail',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 分析一下这个告警',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+    expect(h.agent.runOptions[0]?.prompt ?? '').not.toContain('topic root content');
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_fetch_retry',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 再试一次',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2);
+
+    const second = h.agent.runOptions[1]?.prompt ?? '';
+    expect(second).toContain('topic root content');
+    expect(second).toContain('"origin":"thread-root"');
+    expect(h.channel.fetchRawMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('never injects a root in a regular group', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_group_thread',
+        rootId: 'om_topic_root',
+        parentId: 'om_topic_root',
+        threadId: 'omt_topic',
+        content: '@Bridge 继续说一下',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).not.toContain('"origin":"thread-root"');
     expect(h.channel.fetchRawMessage).not.toHaveBeenCalled();
   });
 
@@ -148,10 +354,16 @@ describe('topic message quote handling', () => {
   });
 });
 
-async function createHarness(options: {
+interface HarnessOptions {
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
-} = {}): Promise<{
+  /** Merged into profileConfig.preferences — e.g. `{ topicRootContext: false }`. */
+  preferences?: Record<string, unknown>;
+  /** Make the first fetchRawMessage call reject, to exercise the retry path. */
+  failFetchOnce?: boolean;
+}
+
+async function createHarness(options: HarnessOptions = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
   agent: FakeAgentAdapter;
@@ -182,6 +394,14 @@ async function createHarness(options: {
       ...baseProfileConfig.workspaces,
       default: workspace,
     },
+    ...(options.preferences
+      ? {
+          preferences: {
+            ...(baseProfileConfig as { preferences?: Record<string, unknown> }).preferences,
+            ...options.preferences,
+          },
+        }
+      : {}),
   };
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
@@ -223,15 +443,15 @@ async function startTestBridge(h: {
   cleanups.push(() => bridge.disconnect());
 }
 
-function createFakeLarkChannel(options: {
-  chatMode?: 'group' | 'topic';
-  quotedMessages?: Record<string, string>;
-} = {}): FakeLarkChannel & { handlers: MessageHandlerMap } {
+function createFakeLarkChannel(
+  options: HarnessOptions = {},
+): FakeLarkChannel & { handlers: MessageHandlerMap } {
   const handlers: MessageHandlerMap = {};
   const chatMode = options.chatMode ?? 'topic';
   const quotedMessages = options.quotedMessages ?? {
     om_topic_root: 'topic root content',
   };
+  let fetchFailed = false;
   return {
     handlers,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
@@ -248,7 +468,12 @@ function createFakeLarkChannel(options: {
     },
     getAppInfo: vi.fn(async () => ({ ownerId: 'ou_owner' })),
     listChats: vi.fn(async () => []),
-    fetchRawMessage: vi.fn(async (messageId: string) => [
+    fetchRawMessage: vi.fn(async (messageId: string) => {
+      if (options.failFetchOnce && !fetchFailed) {
+        fetchFailed = true;
+        throw new Error('simulated feishu failure');
+      }
+      return [
       {
         message_id: messageId,
         msg_type: 'text',
@@ -260,7 +485,8 @@ function createFakeLarkChannel(options: {
         create_time: '1760000000000',
         sender: { id: 'ou_quote_sender' },
       },
-    ]),
+      ];
+    }),
     on(nextHandlers) {
       Object.assign(handlers, nextHandlers);
     },

@@ -29,6 +29,8 @@ export interface BridgePromptQuotedMessage {
   createdAt?: string;
   rawContentType: string;
   content: string;
+  /** `explicit` = user-quoted; `thread-root` = bridge-injected topic opener. */
+  origin?: 'explicit' | 'thread-root';
 }
 
 export interface BridgePromptInteractiveCard {

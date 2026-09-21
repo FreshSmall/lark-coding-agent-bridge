@@ -39,6 +39,24 @@ describe('bridge system prompt bot collaboration rules', () => {
   });
 });
 
+describe('bridge system prompt quote origin rules', () => {
+  it('documents both quote origins', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('origin');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('explicit');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('thread-root');
+  });
+
+  it('explains that a thread-root quote is bridge-injected, not user-quoted', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('话题首条消息');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('用户没有显式引用');
+  });
+
+  it('warns that the injection happens once, so the agent must not ask for a resend', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('只在');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('不要反过来要求用户再发一遍');
+  });
+});
+
 describe('buildBridgeSystemPrompt', () => {
   it('returns the base prompt unchanged when no identity is available', () => {
     expect(buildBridgeSystemPrompt(undefined)).toBe(BRIDGE_SYSTEM_PROMPT);

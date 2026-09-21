@@ -3,6 +3,7 @@ import type { NormalizedMessage } from '@larksuite/channel';
 import {
   shouldReplyInThread,
   replyQuoteTargetForMessage,
+  implicitThreadRootTarget,
 } from '../../../src/bot/thread-policy.js';
 
 function msg(partial: Partial<NormalizedMessage>): NormalizedMessage {
@@ -61,5 +62,33 @@ describe('replyQuoteTargetForMessage', () => {
 
   it('returns the quote target for a plain (non-threaded) reply', () => {
     expect(replyQuoteTargetForMessage(msg({ replyToMessageId: 'q1' }))).toBe('q1');
+  });
+});
+
+describe('implicitThreadRootTarget', () => {
+  it('returns the root for an in-thread message', () => {
+    expect(
+      implicitThreadRootTarget(
+        msg({ messageId: 'm2', threadId: 'omt_1', rootId: 'root1' }),
+      ),
+    ).toBe('root1');
+  });
+
+  it('returns undefined outside a thread', () => {
+    expect(implicitThreadRootTarget(msg({ rootId: 'root1' }))).toBeUndefined();
+  });
+
+  it('returns undefined when the message IS the root', () => {
+    expect(
+      implicitThreadRootTarget(
+        msg({ messageId: 'root1', threadId: 'omt_1', rootId: 'root1' }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined when there is no rootId', () => {
+    expect(
+      implicitThreadRootTarget(msg({ messageId: 'm2', threadId: 'omt_1' })),
+    ).toBeUndefined();
   });
 });

@@ -42,6 +42,7 @@ import {
   getRunIdleTimeoutMs,
   getSessionRotateMaxBytes,
   getToolCallDisplay,
+  getTopicRootContext,
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
 import { log, reportMetric, withTrace } from '../core/logger';
@@ -59,14 +60,18 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
-import { shouldReplyInThread, replyQuoteTargetForMessage } from './thread-policy';
+import {
+  shouldReplyInThread,
+  replyQuoteTargetForMessage,
+  implicitThreadRootTarget,
+} from './thread-policy';
 import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
-import { fetchQuotedContext, type QuotedContext } from './quote';
+import { fetchQuotedContext, type QuotedContext, type QuoteOrigin } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
@@ -676,28 +681,49 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  // Collect any reply-quote targets in the batch. Dedup so the same target
-  // quoted by multiple messages in one batch only fetches once. Filter out
-  // ids that are themselves in the batch — those are already in the prompt.
+  // Collect the messages to pull in as context. Two sources: what the user
+  // explicitly reply-quoted, and — on a topic's first turn — the thread root,
+  // which is usually the alert / broadcast that opened the topic. Dedup so
+  // the same target only fetches once, and filter out ids already in the
+  // batch (their content is in the prompt anyway).
   const batchIds = new Set(batch.map((m) => m.messageId));
-  const quoteTargets = [
-    ...new Set(
-      batch
-        .map((m) => replyQuoteTargetForMessage(m))
-        .filter((id): id is string => Boolean(id) && !batchIds.has(id!)),
-    ),
-  ];
+  const seenTargets = new Set<string>();
+  const quoteTargets: Array<{ id: string; origin: QuoteOrigin }> = [];
+  const pushTarget = (id: string | undefined, origin: QuoteOrigin): void => {
+    if (!id || batchIds.has(id) || seenTargets.has(id)) return;
+    seenTargets.add(id);
+    quoteTargets.push({ id, origin });
+  };
+
+  // Explicit quotes go first: when the same id is both quoted and the thread
+  // root, `explicit` is the stronger claim about user intent.
+  for (const m of batch) pushTarget(replyQuoteTargetForMessage(m), 'explicit');
+
+  const injectRoot =
+    mode === 'topic' &&
+    getTopicRootContext(controls.cfg) &&
+    !sessions.hasInjectedThreadRoot(scope);
+  if (injectRoot) pushTarget(implicitThreadRootTarget(firstMsg), 'thread-root');
+
   const quotes: QuotedContext[] = [];
-  for (const targetId of quoteTargets) {
-    const q = await fetchQuotedContext(channel, targetId);
+  for (const target of quoteTargets) {
+    const q = await fetchQuotedContext(channel, target.id);
     if (q) {
-      quotes.push(q);
+      quotes.push({ ...q, origin: target.origin });
       log.info('quote', 'fetched', {
-        messageId: targetId,
+        messageId: target.id,
+        origin: target.origin,
         type: q.rawContentType,
         contentChars: q.content.length,
       });
     }
+  }
+
+  // Mark only after the content actually landed: fetchQuotedContext swallows
+  // API failures, and marking on a failed fetch would lose this topic's root
+  // for the rest of the session with nothing to show for it.
+  if (injectRoot && quotes.some((q) => q.origin === 'thread-root')) {
+    sessions.markThreadRootInjected(scope);
   }
 
   const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity);
@@ -1577,6 +1603,7 @@ function toPromptQuote(q: QuotedContext): BridgePromptQuotedMessage {
     senderId: q.senderId,
     ...(q.senderName ? { senderName: q.senderName } : {}),
     ...(q.createdAt ? { createdAt: q.createdAt } : {}),
+    ...(q.origin ? { origin: q.origin } : {}),
     rawContentType: q.rawContentType,
     content: q.content,
   };

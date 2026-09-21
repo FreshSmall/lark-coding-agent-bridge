@@ -118,6 +118,13 @@ export interface AppPreferences {
    */
   replyInThreadInGroup?: boolean;
   /**
+   * Whether bridge auto-injects a topic's opening message (the thread root)
+   * as context on the first turn of each topic session. Default true. Only
+   * affects topic-mode groups. Set false to keep prompts minimal — users can
+   * still reply-quote the root by hand.
+   */
+  topicRootContext?: boolean;
+  /**
    * How tool-call blocks render in the card. Tri-state:
    *   - `full`     : header + collapsible body (input args + truncated output)
    *   - `compact`  : header-only one-liners (icon + tool name + short summary)
@@ -361,6 +368,15 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
  */
 export function getReplyInThreadInGroup(cfg: AppConfig): boolean {
   return cfg.preferences?.replyInThreadInGroup !== false;
+}
+
+/**
+ * Resolve the topic-root-context preference. Default `true` — the `!== false`
+ * check makes older configs without the field inherit the new default. Only
+ * affects topic groups; regular groups and p2p never inject a root.
+ */
+export function getTopicRootContext(cfg: AppConfig): boolean {
+  return cfg.preferences?.topicRootContext !== false;
 }
 
 /**

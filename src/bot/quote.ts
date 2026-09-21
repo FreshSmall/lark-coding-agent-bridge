@@ -19,7 +19,16 @@ export interface QuotedContext {
    * </forwarded_messages>` (capped at 50 items by the SDK). */
   content: string;
   rawContentType: string;
+  /**
+   * How this context entered the prompt. `explicit` = the user reply-quoted
+   * it; `thread-root` = bridge auto-injected the topic's opening message.
+   * Set by the caller, which is the only side that knows its own intent;
+   * absent is treated as `explicit` downstream.
+   */
+  origin?: QuoteOrigin;
 }
+
+export type QuoteOrigin = 'explicit' | 'thread-root';
 
 /**
  * Fetch and normalize the content of a message that the user is reply-quoting.

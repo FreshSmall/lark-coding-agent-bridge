@@ -22,6 +22,12 @@ export class SessionStore {
   private data: SessionMap = {};
   private saving: Promise<void> = Promise.resolve();
   private readonly path: string;
+  /**
+   * Scopes whose thread root has already been injected into a prompt.
+   * Deliberately **not** persisted: after a restart the agent process is gone
+   * too, so re-injecting once is the right behavior, not a regression.
+   */
+  private readonly threadRootInjected = new Set<string>();
 
   constructor(path: string = paths.sessionsFile) {
     this.path = path;
@@ -89,7 +95,21 @@ export class SessionStore {
     this.schedulePersist();
   }
 
+  /** Whether this scope already had its thread root injected into a prompt. */
+  hasInjectedThreadRoot(chatId: string): boolean {
+    return this.threadRootInjected.has(chatId);
+  }
+
+  markThreadRootInjected(chatId: string): void {
+    this.threadRootInjected.add(chatId);
+  }
+
   clear(chatId: string): void {
+    // Before the early return below: a run that injected the root but never
+    // recorded a session id leaves a marker with no entry, and `/new` on that
+    // scope has to clear it anyway.
+    this.threadRootInjected.delete(chatId);
+
     const prev = this.data[chatId];
     if (!prev) return;
     if (prev.idleTimeoutMinutes !== undefined) {

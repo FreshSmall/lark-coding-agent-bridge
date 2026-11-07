@@ -448,6 +448,7 @@ export function createRuntimeAgent(
             : {}),
         }
       : undefined;
+  const launcher = profileConfig.agentLauncher;
   if (profileConfig.agentKind === 'codex') {
     const codex = profileConfig.codex;
     if (!codex?.binaryPath) {
@@ -462,13 +463,15 @@ export function createRuntimeAgent(
       ignoreRules: codex.ignoreRules !== false,
       sandbox: profileConfig.sandbox.defaultMode,
       larkChannel,
+      launcher,
     });
   }
   if (cfg && getClaudeDriver(cfg) === 'headless') {
-    return new ClaudeHeadlessAdapter({ larkChannel });
+    return new ClaudeHeadlessAdapter({ larkChannel, launcher });
   }
   return new ClaudePtyAdapter({
     larkChannel,
+    launcher,
     ...(cfg ? { maxSilenceMs: getTurnSilenceTimeoutMs(cfg), maxTurnMs: getTurnMaxMs(cfg) } : {}),
   });
 }

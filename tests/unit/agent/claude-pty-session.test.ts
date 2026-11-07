@@ -95,6 +95,42 @@ describe('PtySession', () => {
     ]);
   });
 
+  it('with readyMarker, a launcher banner + pause does not count as a ready TUI', async () => {
+    const cwd = '/Users/me/proj';
+    const sessionId = 'sess-marker';
+    const home = await makeJsonlHome(cwd, sessionId);
+    const stub = createStubPty();
+    const session = new PtySession({
+      pty: stub.handle,
+      cwd,
+      sessionId,
+      home,
+      pollMs: 10,
+      promptDelayMs: 5,
+      readinessQuietMs: 30,
+      readinessMaxMs: 5000,
+      readyMarker: '\x1b[?2004h',
+    });
+
+    const events: AgentEvent[] = [];
+    const turn = (async () => {
+      for await (const ev of session.runTurn('hello')) events.push(ev);
+    })();
+
+    // seedx banner, then a pause well past the quiet window.
+    stub.emitData('agent=claude · 权限=受限\n拉起 claude 会话(不绑需求)…\n');
+    await new Promise((r) => setTimeout(r, 150));
+    expect(stub.writes).toEqual([]);
+
+    // claude's first frame arrives; prompt goes out after the quiet window.
+    stub.emitData('\x1b[?25l\x1b[?2004h\x1b[?1004h welcome');
+    await new Promise((r) => setTimeout(r, 150));
+    expect(stub.writes.slice(0, 2)).toEqual(['hello', '\r']);
+
+    stub.emitExit(0);
+    await turn;
+  });
+
   it('flattens internal newlines so the TUI sees one line + Submit', async () => {
     const cwd = '/Users/me/proj';
     const sessionId = 'sess-newlines';
@@ -157,6 +193,62 @@ describe('PtySession', () => {
     stub.emitData('Yes, I trust this folder\n');
     await new Promise((r) => setTimeout(r, 150));
     expect(stub.writes.filter((w) => w === '\r').length).toBe(trustPresses);
+  });
+
+  it('resends a consent answer claude dropped, and stops once claude reacts', async () => {
+    const cwd = '/Users/me/proj';
+    const sessionId = 'sess-consent-retry';
+    const home = await makeJsonlHome(cwd, sessionId);
+    const stub = createStubPty();
+    void new PtySession({ pty: stub.handle, cwd, sessionId, home, readinessQuietMs: 0, consentDelayMs: 10 });
+
+    stub.emitData('Quick safety check\n ❯ No, continue without these permissions\n   Yes, I trust this folder\n');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(stub.writes).toEqual(['\r']);
+
+    // No redraw after the first Enter → it was dropped → resend after the retry window.
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(stub.writes).toEqual(['\r', '\r']);
+
+    // claude reacts → no more presses.
+    stub.emitData('\x1b[2J main TUI');
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(stub.writes).toEqual(['\r', '\r']);
+  });
+
+  it('does not type the prompt while a consent dialog is still unanswered', async () => {
+    const cwd = '/Users/me/proj';
+    const sessionId = 'sess-consent-gate';
+    const home = await makeJsonlHome(cwd, sessionId);
+    const stub = createStubPty();
+    const session = new PtySession({
+      pty: stub.handle,
+      cwd,
+      sessionId,
+      home,
+      pollMs: 10,
+      promptDelayMs: 5,
+      readinessQuietMs: 30,
+      readinessMaxMs: 5000,
+      consentDelayMs: 200,
+    });
+    const turn = (async () => {
+      for await (const _ev of session.runTurn('hello')) { /* drain */ }
+    })();
+
+    stub.emitData('Yes, I trust this folder\n');
+    // Quiet window (30ms) elapses long before the consent key goes out.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(stub.writes).toEqual([]);
+
+    await new Promise((r) => setTimeout(r, 100));
+    expect(stub.writes).toEqual(['\r']);
+    stub.emitData('main TUI');
+    await new Promise((r) => setTimeout(r, 150));
+    expect(stub.writes).toEqual(['\r', 'hello', '\r']);
+
+    stub.emitExit(0);
+    await turn;
   });
 
   it('handles the "Bypass Permissions" consent by pressing 2 (one-time)', async () => {

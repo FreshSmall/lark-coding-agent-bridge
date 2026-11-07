@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { log } from '../../core/logger';
+import type { AgentLauncherConfig } from '../../config/profile-schema';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import { applyLauncher, launcherBinary } from '../launcher';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import {
   CLAUDE_DEFAULT_PERMISSION_MODE,
@@ -18,9 +20,14 @@ import { PtySession } from './pty-session';
 import { ClaudePtyPool, type PtySessionLike } from './pty-pool';
 import { spawnPty } from './pty';
 
+/** Bracketed-paste enable — emitted by claude's TUI on its first frame. */
+const CLAUDE_TUI_READY_MARKER = '\x1b[?2004h';
+
 export interface ClaudePtyAdapterOptions {
   binary?: string;
   larkChannel?: LarkChannelEnvContext;
+  /** Launch through a wrapper CLI (e.g. seedx) instead of exec'ing claude. */
+  launcher?: AgentLauncherConfig;
   /** Test-only: override $HOME for the JSONL path. */
   homeOverride?: string;
   /** Test-only: extra env to pass into the spawned claude. */
@@ -39,6 +46,7 @@ export class ClaudePtyAdapter implements AgentAdapter {
 
   private readonly binary: string;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
+  private readonly launcher: AgentLauncherConfig | undefined;
   private readonly homeOverride: string | undefined;
   private readonly extraEnv: Record<string, string>;
   private readonly readinessQuietMs: number | undefined;
@@ -50,6 +58,7 @@ export class ClaudePtyAdapter implements AgentAdapter {
   constructor(opts: ClaudePtyAdapterOptions = {}) {
     this.binary = opts.binary ?? 'claude';
     this.larkChannel = opts.larkChannel;
+    this.launcher = opts.launcher;
     this.homeOverride = opts.homeOverride;
     this.extraEnv = opts.env ?? {};
     this.readinessQuietMs = opts.readinessQuietMs;
@@ -69,11 +78,12 @@ export class ClaudePtyAdapter implements AgentAdapter {
   }
 
   async checkAvailability(): Promise<AgentAvailability> {
+    const command = this.launcher ? launcherBinary(this.launcher) : this.binary;
     return checkAgentAvailability({
       agentId: 'claude',
       agentName: 'Claude Code',
-      command: this.binary,
-      binaryPath: this.binary,
+      command,
+      binaryPath: command,
     });
   }
 
@@ -192,7 +202,7 @@ export class ClaudePtyAdapter implements AgentAdapter {
       ...(model ? ['--model', model] : []),
     ];
 
-    log.info('agent', 'claude-pty-spawn', { sessionId, cwd, resume });
+    log.info('agent', 'claude-pty-spawn', { sessionId, cwd, resume, launcher: this.launcher?.kind });
 
     const env = {
       ...process.env,
@@ -201,13 +211,18 @@ export class ClaudePtyAdapter implements AgentAdapter {
       ...this.extraEnv,
     } as Record<string, string | undefined>;
 
-    const pty = spawnPty({ file: this.binary, args, cwd, env });
+    const pty = spawnPty({ ...applyLauncher(this.launcher, 'claude', { file: this.binary, args, env }), cwd });
     return new PtySession({
       pty,
       cwd,
       sessionId,
       ...(this.homeOverride ? { home: this.homeOverride } : {}),
       ...(this.readinessQuietMs !== undefined ? { readinessQuietMs: this.readinessQuietMs } : {}),
+      // seedx prints a banner, then pauses to fetch a gateway token before
+      // exec'ing claude; only claude's TUI enables bracketed paste. seedx's
+      // workspace baseline also pre-approves tools in .claude/settings.json,
+      // so the trust dialog shows on every session — answer it less eagerly.
+      ...(this.launcher ? { readyMarker: CLAUDE_TUI_READY_MARKER, consentDelayMs: 500 } : {}),
       ...(this.maxSilenceMs !== undefined ? { maxSilenceMs: this.maxSilenceMs } : {}),
       ...(this.maxTurnMs !== undefined ? { maxTurnMs: this.maxTurnMs } : {}),
     });

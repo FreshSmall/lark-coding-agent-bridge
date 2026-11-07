@@ -1,9 +1,11 @@
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
+import type { AgentLauncherConfig } from '../../config/profile-schema';
 import { log } from '../../core/logger';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import { applyLauncher, launcherBinary } from '../launcher';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import {
   CLAUDE_DEFAULT_PERMISSION_MODE,
@@ -18,6 +20,8 @@ import { createStreamJsonTranslator } from './stream-json';
 export interface ClaudeHeadlessAdapterOptions {
   binary?: string;
   larkChannel?: LarkChannelEnvContext;
+  /** Launch through a wrapper CLI (e.g. seedx) instead of exec'ing claude. */
+  launcher?: AgentLauncherConfig;
 }
 
 type ClaudeChild = SpawnedProcessByStdio<null, Readable, Readable>;
@@ -28,11 +32,13 @@ export class ClaudeHeadlessAdapter implements AgentAdapter {
 
   private readonly binary: string;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
+  private readonly launcher: AgentLauncherConfig | undefined;
   private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: ClaudeHeadlessAdapterOptions = {}) {
     this.binary = opts.binary ?? 'claude';
     this.larkChannel = opts.larkChannel;
+    this.launcher = opts.launcher;
   }
 
   setBotIdentity(identity: AgentBotIdentity): void {
@@ -44,11 +50,12 @@ export class ClaudeHeadlessAdapter implements AgentAdapter {
   }
 
   async checkAvailability(): Promise<AgentAvailability> {
+    const command = this.launcher ? launcherBinary(this.launcher) : this.binary;
     return checkAgentAvailability({
       agentId: 'claude',
       agentName: 'Claude Code',
-      command: this.binary,
-      binaryPath: this.binary,
+      command,
+      binaryPath: command,
     });
   }
 
@@ -74,9 +81,14 @@ export class ClaudeHeadlessAdapter implements AgentAdapter {
     if (opts.sessionId) args.push('--resume', opts.sessionId);
     if (opts.model) args.push('--model', opts.model);
 
-    const child = spawnProcess(this.binary, args, {
-      cwd: opts.cwd,
+    const launch = applyLauncher(this.launcher, 'claude', {
+      file: this.binary,
+      args,
       env: mergeProcessEnv(process.env, buildLarkChannelEnv(this.larkChannel)),
+    });
+    const child = spawnProcess(launch.file, launch.args, {
+      cwd: opts.cwd,
+      env: launch.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     }) as ClaudeChild;
 

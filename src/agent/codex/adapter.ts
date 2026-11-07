@@ -1,12 +1,13 @@
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { join } from 'node:path';
-import type { SandboxMode } from '../../config/profile-schema';
+import type { AgentLauncherConfig, SandboxMode } from '../../config/profile-schema';
 import { log } from '../../core/logger';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { SpawnFailed } from '../../runtime/errors';
 import { prefixBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import { applyLauncher, launcherBinary } from '../launcher';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import type {
   AgentAdapter,
@@ -28,6 +29,8 @@ export interface CodexAdapterOptions {
   sandbox?: SandboxMode;
   stopGraceMs?: number;
   larkChannel?: LarkChannelEnvContext;
+  /** Launch through a wrapper CLI (e.g. seedx) instead of exec'ing codex. */
+  launcher?: AgentLauncherConfig;
 }
 
 type CodexChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -45,6 +48,7 @@ export class CodexAdapter implements AgentAdapter {
   private readonly sandbox: SandboxMode;
   private readonly defaultStopGraceMs: number;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
+  private readonly launcher: AgentLauncherConfig | undefined;
   private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: CodexAdapterOptions) {
@@ -57,6 +61,7 @@ export class CodexAdapter implements AgentAdapter {
     this.sandbox = opts.sandbox ?? 'danger-full-access';
     this.defaultStopGraceMs = opts.stopGraceMs ?? 5000;
     this.larkChannel = opts.larkChannel;
+    this.launcher = opts.launcher;
   }
 
   setBotIdentity(identity: AgentBotIdentity): void {
@@ -68,11 +73,12 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async checkAvailability(): Promise<AgentAvailability> {
+    const command = this.launcher ? launcherBinary(this.launcher) : this.binary;
     return checkAgentAvailability({
       agentId: 'codex',
       agentName: 'Codex CLI',
-      command: this.binary,
-      binaryPath: this.binary,
+      command,
+      binaryPath: command,
     });
   }
 
@@ -107,9 +113,14 @@ export class CodexAdapter implements AgentAdapter {
     } else if (!this.inheritCodexHome) {
       envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
     }
-    const child = spawnProcess(this.binary, args, {
-      cwd: opts.cwd,
+    const launch = applyLauncher(this.launcher, 'codex', {
+      file: this.binary,
+      args,
       env: mergeProcessEnv(process.env, envOverrides),
+    });
+    const child = spawnProcess(launch.file, launch.args, {
+      cwd: opts.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as CodexChild;
 

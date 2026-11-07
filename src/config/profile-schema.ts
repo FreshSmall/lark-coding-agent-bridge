@@ -44,6 +44,17 @@ export interface CodexConfig {
   ignoreRules?: boolean;
 }
 
+/**
+ * Launch the agent through a wrapper CLI instead of exec'ing it directly.
+ * `seedx` routes model traffic through the company AI gateway
+ * (`seedx claude|codex -- <args>`).
+ */
+export interface AgentLauncherConfig {
+  kind: 'seedx';
+  /** seedx executable; defaults to `seedx` on PATH. */
+  binaryPath?: string;
+}
+
 export interface AttachmentConfig {
   maxCount: number;
   maxBytes: number;
@@ -90,6 +101,8 @@ export interface ProfileConfig {
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
+  /** Absent = spawn claude/codex directly (default). */
+  agentLauncher?: AgentLauncherConfig;
   /**
    * Extra environment baked into the OS service file (launchd plist / systemd
    * unit / Windows launcher). `bridge start` rewrites that file wholesale, so
@@ -167,6 +180,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
+    agentLauncher?: unknown;
     daemonEnv?: unknown;
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
@@ -198,6 +212,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   const comments = normalizeComments(raw.comments);
   const larkCli = normalizeLarkCli(raw.larkCli);
   const daemonEnv = normalizeDaemonEnv(raw.daemonEnv);
+  const agentLauncher = normalizeAgentLauncher(raw.agentLauncher);
 
   return {
     schemaVersion: 2,
@@ -211,6 +226,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions,
     permissionSource,
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
+    ...(agentLauncher ? { agentLauncher } : {}),
     ...(daemonEnv ? { daemonEnv } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
@@ -303,6 +319,18 @@ function normalizeCodex(input: CodexConfig & { flags?: unknown }): CodexConfig {
     ignoreRules: input.ignoreRules !== false,
   };
   return codex;
+}
+
+function normalizeAgentLauncher(input: unknown): AgentLauncherConfig | undefined {
+  if (input === undefined || input === null) return undefined;
+  const raw = input as { kind?: unknown; binaryPath?: unknown };
+  if (typeof input !== 'object' || raw.kind !== 'seedx') {
+    throw new Error('agentLauncher.kind must be seedx');
+  }
+  const binaryPath = typeof raw.binaryPath === 'string' && raw.binaryPath.trim()
+    ? raw.binaryPath.trim()
+    : undefined;
+  return { kind: 'seedx', ...(binaryPath ? { binaryPath } : {}) };
 }
 
 function normalizeComments(_input: unknown): CommentConfig {

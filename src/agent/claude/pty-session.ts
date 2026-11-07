@@ -35,6 +35,19 @@ export interface PtySessionOptions {
   /** Max wait for first-turn readiness. Default 30000ms. */
   readinessMaxMs?: number;
   /**
+   * Raw output that proves claude's TUI itself has started. When set, the
+   * first-turn quiet window only counts once this has been seen — needed when
+   * a launcher (seedx) prints its own banner and then pauses before exec'ing
+   * claude, which would otherwise look like a booted-and-idle TUI.
+   */
+  readyMarker?: string;
+  /**
+   * Delay before answering a startup consent dialog. Default 100ms. claude
+   * ignores keys that land too soon after the dialog draws; under a launcher
+   * (seedx) the dialog shows on every session, so give it more room.
+   */
+  consentDelayMs?: number;
+  /**
    * Hard hang ceiling (ms): if the turn's JSONL stays silent for this long
    * *while no tool is in flight*, the turn is presumed hung and ends with a
    * failed terminal event (the PTY is then evicted). This is the safety net
@@ -74,6 +87,11 @@ const CONSENT_DIALOGS: ConsentDialog[] = [
   { name: 'bypass-permissions', pattern: /Yes,\s*I\s*accept/i, response: '2\r' },
 ];
 
+// If claude shows no reaction to a consent keystroke, it was dropped (sent
+// before the dialog took input): resend, a bounded number of times.
+const CONSENT_RETRY_MS = 1500;
+const CONSENT_MAX_ATTEMPTS = 3;
+
 const ROLLING_BUFFER_BYTES = 8192;
 const DEFAULT_POLL_MS = 300;
 const DEFAULT_PROMPT_DELAY_MS = 200;
@@ -108,7 +126,10 @@ export class PtySession {
   private readonly reader: JsonlReader;
   private rollingBuffer = '';
   private readonly handledDialogs = new Set<string>();
+  /** Consent dialog we've seen but claude hasn't visibly reacted to yet. */
+  private pendingConsent: { dialog: ConsentDialog; sentAt: number; attempts: number } | undefined;
   private lastDataAt = 0;
+  private readyMarkerSeen = false;
   private firstReady = false;
   private alive = true;
   private exitInfo: { exitCode: number; signal?: number } | undefined;
@@ -174,6 +195,11 @@ export class PtySession {
     }
     this.rollingBuffer = (this.rollingBuffer + s).slice(-ROLLING_BUFFER_BYTES);
     this.lastDataAt = Date.now();
+    // Output after our keystroke = claude took it (the dialog redraws away).
+    if (this.pendingConsent && this.pendingConsent.sentAt > 0) this.pendingConsent = undefined;
+    if (!this.readyMarkerSeen && this.opts.readyMarker && this.rollingBuffer.includes(this.opts.readyMarker)) {
+      this.readyMarkerSeen = true;
+    }
     // Strip ANSI before matching dialogs — claude wraps option labels with
     // color/style codes that can otherwise split the substring we look for.
     const visible = stripAnsi(this.rollingBuffer);
@@ -186,9 +212,30 @@ export class PtySession {
           dialog: dialog.name,
         });
         // Brief delay so the dialog finishes rendering before our key lands.
-        setTimeout(() => this.opts.pty.write(dialog.response), 100);
+        const pending = { dialog, sentAt: 0, attempts: 0 };
+        this.pendingConsent = pending;
+        setTimeout(() => this.sendConsent(pending), this.opts.consentDelayMs ?? 100);
       }
     }
+  }
+
+  private sendConsent(pending: NonNullable<PtySession['pendingConsent']>): void {
+    if (this.pendingConsent !== pending || !this.alive) return;
+    pending.attempts += 1;
+    pending.sentAt = Date.now();
+    if (pending.attempts > 1) {
+      log.warn('agent', 'claude-consent-retry', {
+        sessionId: this.opts.sessionId,
+        dialog: pending.dialog.name,
+        attempt: pending.attempts,
+      });
+    }
+    this.opts.pty.write(pending.dialog.response);
+    setTimeout(() => {
+      if (this.pendingConsent !== pending) return;
+      if (pending.attempts < CONSENT_MAX_ATTEMPTS) this.sendConsent(pending);
+      else this.pendingConsent = undefined; // give up; readiness falls back to its timeout
+    }, CONSENT_RETRY_MS);
   }
 
   /**
@@ -207,13 +254,17 @@ export class PtySession {
     // where claude hasn't drawn anything yet but is mid-boot). If the caller
     // configured quietMs=0, skip this gate entirely (test mode).
     if (quietMs > 0) {
-      while (this.lastDataAt === 0 && Date.now() < deadline) {
+      const booted = (): boolean =>
+        this.opts.readyMarker ? this.readyMarkerSeen : this.lastDataAt !== 0;
+      while (!booted() && Date.now() < deadline) {
         await delay(10);
       }
     }
     while (Date.now() < deadline) {
       const idle = Date.now() - this.lastDataAt;
-      if (idle >= quietMs) {
+      // A consent dialog claude hasn't reacted to yet is still on screen;
+      // typing the prompt now would land in the dialog and be lost.
+      if (idle >= quietMs && !this.pendingConsent) {
         this.firstReady = true;
         return;
       }

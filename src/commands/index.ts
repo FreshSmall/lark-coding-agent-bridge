@@ -4,6 +4,8 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
+import { launcherBinary } from '../agent/launcher';
+import { checkAgentAvailability } from '../agent/preflight';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { LedgerStore } from '../observability/ledger';
@@ -1952,6 +1954,7 @@ async function showConfigForm(ctx: CommandContext): Promise<void> {
     requireMentionInGroup: getRequireMentionInGroup(ctx.controls.cfg),
     replyInThreadInGroup: getReplyInThreadInGroup(ctx.controls.cfg),
     claudeDriver: getClaudeDriver(ctx.controls.cfg),
+    agentLauncher: currentAgentLauncher(ctx),
     larkCliIdentity: ctx.controls.profileConfig.larkCli.identityPreset,
     allowedUsers: access.allowedUsers,
     allowedChats: access.allowedChats,
@@ -2052,6 +2055,16 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
   const rawDriver = String(fv.claude_driver ?? '').trim();
   const claudeDriver: 'pty' | 'headless' =
     rawDriver === 'headless' ? 'headless' : 'pty';
+  // The driver only picks the adapter for claude profiles.
+  const claudeDriverChanged =
+    ctx.controls.profileConfig.agentKind === 'claude' &&
+    claudeDriver !== getClaudeDriver(ctx.controls.cfg);
+  // Empty / unexpected keeps current.
+  const rawLauncher = String(fv.agent_launcher ?? '').trim();
+  const previousAgentLauncher = currentAgentLauncher(ctx);
+  const agentLauncher: 'direct' | 'seedx' =
+    rawLauncher === 'direct' || rawLauncher === 'seedx' ? rawLauncher : previousAgentLauncher;
+  const agentLauncherChanged = agentLauncher !== previousAgentLauncher;
   const rawLarkCliIdentity = String(fv.lark_cli_identity ?? '').trim();
   const larkCliIdentity =
     rawLarkCliIdentity === 'user-default' || rawLarkCliIdentity === 'bot-only'
@@ -2098,6 +2111,13 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     let failureStep = 'config.save';
     let larkCliPolicyApplied = false;
     try {
+      if (agentLauncherChanged && agentLauncher === 'seedx') {
+        // Refuse before writing anything: a saved seedx launcher without a
+        // working seedx would also fail the next bridge start.
+        failureStep = 'config.seedx-check';
+        await assertSeedxAvailable(ctx);
+        failureStep = 'config.save';
+      }
       if (larkCliIdentityChanged) {
         failureStep = 'config.lark-cli-policy';
         const applied = await applyConfigLarkCliIdentityPolicy(ctx, larkCliIdentity);
@@ -2107,7 +2127,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         larkCliPolicyApplied = true;
         failureStep = 'config.save';
       }
-      await savePreferencesConfig(ctx, nextPreferences, requireMentionInGroup, larkCliIdentity);
+      await savePreferencesConfig(ctx, nextPreferences, requireMentionInGroup, larkCliIdentity, agentLauncher);
     } catch (err) {
       let rollbackFailed = false;
       if (larkCliIdentityChanged) {
@@ -2126,7 +2146,11 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       await showResultCardInPlace(
         ctx,
         formMsgId,
-        configFailedCard(configFailureMessage(failureStep, rollbackFailed, larkCliPolicyApplied)),
+        configFailedCard(
+          failureStep === 'config.seedx-check'
+            ? `seedx 不可用,未做任何修改:${err instanceof Error ? err.message : String(err)}`
+            : configFailureMessage(failureStep, rollbackFailed, larkCliPolicyApplied),
+        ),
       );
       return;
     }
@@ -2140,6 +2164,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       requireMentionInGroup,
       replyInThreadInGroup,
       larkCliIdentity,
+      agentLauncher,
       allowedUsersCount: access.allowedUsers.length,
       allowedChatsCount: access.allowedChats.length,
       adminsCount: access.admins.length,
@@ -2157,6 +2182,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         requireMentionInGroup,
         replyInThreadInGroup,
         claudeDriver,
+        agentLauncher,
         larkCliIdentity,
         allowedUsers: access.allowedUsers,
         allowedChats: access.allowedChats,
@@ -2164,7 +2190,26 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         knownChats: ctx.controls.knownChats ?? [],
       }),
     );
+    // The agent adapter is built once per runtime; switching the launcher or
+    // the claude driver needs a rebuild. Same path as `/reconnect --wait`:
+    // let in-flight runs finish instead of killing them.
+    if (agentLauncherChanged || claudeDriverChanged) await handleReconnect('--wait', ctx);
   })();
+}
+
+function currentAgentLauncher(ctx: CommandContext): 'direct' | 'seedx' {
+  return ctx.controls.profileConfig.agentLauncher ? 'seedx' : 'direct';
+}
+
+async function assertSeedxAvailable(ctx: CommandContext): Promise<void> {
+  const command = launcherBinary(ctx.controls.profileConfig.agentLauncher ?? { kind: 'seedx' });
+  const availability = await checkAgentAvailability({
+    agentId: ctx.controls.profileConfig.agentKind,
+    agentName: 'seedx',
+    command,
+    binaryPath: command,
+  });
+  if (!availability.ok) throw availability.error;
 }
 
 function parseToolCallDisplay(raw: string, fallback: ToolCallDisplay): ToolCallDisplay {
@@ -2256,6 +2301,7 @@ async function savePreferencesConfig(
   preferences: AppPreferences,
   requireMentionInGroup: boolean,
   larkCliIdentity: ProfileConfig['larkCli']['identityPreset'],
+  agentLauncher: 'direct' | 'seedx',
 ): Promise<void> {
   const larkCli = {
     identityPreset: larkCliIdentity,
@@ -2277,8 +2323,11 @@ async function savePreferencesConfig(
     const profile = root.profiles[ctx.controls.profile];
     if (!profile) throw new Error(`profile not found: ${ctx.controls.profile}`);
     const { requireMentionInGroup: _requireMention, access: _access, ...profilePreferences } = preferences;
+    const { agentLauncher: previousLauncher, ...profileRest } = profile;
     root.profiles[ctx.controls.profile] = {
-      ...profile,
+      ...profileRest,
+      // Keep a configured seedx binaryPath when the switch stays on.
+      ...(agentLauncher === 'seedx' ? { agentLauncher: previousLauncher ?? { kind: 'seedx' as const } } : {}),
       preferences: {
         ...profile.preferences,
         ...profilePreferences,

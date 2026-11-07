@@ -9,6 +9,7 @@ import { resolveAppPaths } from '../../../src/config/app-paths';
 import { getSecret, listSecretIds } from '../../../src/config/keystore';
 import {
   createDefaultProfileConfig,
+  type ProfileConfig,
   type RootConfig,
 } from '../../../src/config/profile-schema';
 import { runtimeProfileConfig } from '../../../src/config/profile-store';
@@ -40,11 +41,24 @@ vi.mock('../../../src/lark-cli/identity-policy', async () => {
   };
 });
 
+const preflightMocks = vi.hoisted(() => ({
+  checkAgentAvailability: vi.fn(async () => ({ ok: true, version: '1.7.0' }) as unknown),
+}));
+
+vi.mock('../../../src/agent/preflight', async () => {
+  const actual = await vi.importActual<typeof import('../../../src/agent/preflight')>(
+    '../../../src/agent/preflight',
+  );
+  return { ...actual, checkAgentAvailability: preflightMocks.checkAgentAvailability };
+});
+
 const roots: string[] = [];
 
 beforeEach(() => {
   identityPolicyMocks.applyLarkCliIdentityPolicy.mockReset();
   identityPolicyMocks.applyLarkCliIdentityPolicy.mockResolvedValue(true);
+  preflightMocks.checkAgentAvailability.mockReset();
+  preflightMocks.checkAgentAvailability.mockResolvedValue({ ok: true, version: '1.7.0' });
 });
 
 afterEach(async () => {
@@ -162,6 +176,84 @@ describe('profile-aware account and config commands', () => {
     expect(card).not.toContain('偏好已保存');
   });
 
+  it('switches the model channel to seedx and reconnects after in-flight runs', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness();
+
+    await h.command('/config submit', { agent_launcher: 'seedx' });
+
+    const root = await waitForRoot(h.rootDir, (r) => r.profiles.claude?.agentLauncher !== undefined);
+    expect(root.profiles.claude?.agentLauncher).toEqual({ kind: 'seedx' });
+    expect(preflightMocks.checkAgentAvailability).toHaveBeenCalledWith(
+      expect.objectContaining({ command: 'seedx' }),
+    );
+    await vi.waitFor(() => expect(h.controls.restart).toHaveBeenCalledWith({ wait: true }));
+    expect(JSON.stringify(h.channel.sent)).toContain('seedx(公司 AI 网关)');
+  });
+
+  it('refuses to switch to seedx when seedx is not available', async () => {
+    vi.useFakeTimers();
+    preflightMocks.checkAgentAvailability.mockResolvedValueOnce({
+      ok: false,
+      error: new Error('seedx: command not found'),
+      diagnostic: {},
+    });
+    const h = await createHarness();
+
+    await h.command('/config submit', { agent_launcher: 'seedx', message_reply: 'text' });
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(h.channel.sent.length).toBeGreaterThan(0));
+
+    const root = await readRoot(h.rootDir);
+    expect(root.profiles.claude?.agentLauncher).toBeUndefined();
+    expect(root.profiles.claude?.preferences.messageReply).not.toBe('text');
+    const card = JSON.stringify(h.channel.sent.at(-1)?.content);
+    expect(card).toContain('seedx 不可用');
+    expect(card).toContain('command not found');
+    expect(h.controls.restart).not.toHaveBeenCalled();
+  });
+
+  it('switches back to direct and reconnects; an unchanged seedx keeps its binaryPath without reconnecting', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({ agentLauncher: { kind: 'seedx', binaryPath: '/opt/seedx' } });
+
+    await h.command('/config submit', { agent_launcher: 'seedx', message_reply: 'text' });
+    let root = await waitForRoot(h.rootDir, (r) => r.profiles.claude?.preferences.messageReply === 'text');
+    expect(root.profiles.claude?.agentLauncher).toEqual({ kind: 'seedx', binaryPath: '/opt/seedx' });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.controls.restart).not.toHaveBeenCalled();
+    expect(preflightMocks.checkAgentAvailability).not.toHaveBeenCalled();
+
+    await h.command('/config submit', { agent_launcher: 'direct' });
+    root = await waitForRoot(h.rootDir, (r) => r.profiles.claude?.agentLauncher === undefined);
+    expect(root.profiles.claude).not.toHaveProperty('agentLauncher');
+    await vi.waitFor(() => expect(h.controls.restart).toHaveBeenCalledWith({ wait: true }));
+  });
+
+  it('reconnects after in-flight runs when the claude driver changes', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness();
+
+    await h.command('/config submit', { claude_driver: 'headless' });
+
+    const root = await waitForRoot(h.rootDir, (r) => r.profiles.claude?.preferences.claudeDriver === 'headless');
+    expect(root.profiles.claude?.preferences.claudeDriver).toBe('headless');
+    await vi.waitFor(() => expect(h.controls.restart).toHaveBeenCalledWith({ wait: true }));
+  });
+
+  it('does not reconnect when neither the driver nor the model channel changes', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness();
+
+    await h.command('/config submit', { claude_driver: 'pty', agent_launcher: 'direct', message_reply: 'text' });
+
+    await waitForRoot(h.rootDir, (r) => r.profiles.claude?.preferences.messageReply === 'text');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(JSON.stringify(h.channel.sent)).toContain('偏好已保存');
+    expect(h.controls.restart).not.toHaveBeenCalled();
+  });
+
   it('saves /account submit into the active v2 profile and profile-local keystore', async () => {
     vi.useFakeTimers();
     const h = await createHarness();
@@ -200,16 +292,17 @@ describe('profile-aware account and config commands', () => {
   });
 });
 
-async function createHarness(): Promise<{
+async function createHarness(opts: { agentLauncher?: ProfileConfig['agentLauncher'] } = {}): Promise<{
   rootDir: string;
   channel: ReturnType<typeof createFakeChannel>;
+  controls: Controls;
   command(content: string, formValue?: Record<string, unknown>): Promise<boolean>;
 }> {
   const rootDir = await mkdtemp(join(tmpdir(), 'bridge-profile-config-command-'));
   roots.push(rootDir);
   const workspace = join(rootDir, 'workspace');
   await mkdir(workspace, { recursive: true });
-  const root = await writeRoot(rootDir, workspace);
+  const root = await writeRoot(rootDir, workspace, opts.agentLauncher);
   const profileConfig = root.profiles.claude!;
   const appPaths = resolveAppPaths({ rootDir, profile: 'claude' });
   const channel = createFakeChannel();
@@ -231,6 +324,7 @@ async function createHarness(): Promise<{
   return {
     rootDir,
     channel,
+    controls,
     command: (content: string, formValue?: Record<string, unknown>) =>
       tryHandleCommand({
         channel: channel as unknown as CommandContext['channel'],
@@ -248,7 +342,11 @@ async function createHarness(): Promise<{
   };
 }
 
-async function writeRoot(rootDir: string, workspace: string): Promise<RootConfig> {
+async function writeRoot(
+  rootDir: string,
+  workspace: string,
+  agentLauncher?: ProfileConfig['agentLauncher'],
+): Promise<RootConfig> {
   const root: RootConfig = {
     schemaVersion: 2,
     activeProfile: 'claude',
@@ -271,6 +369,7 @@ async function writeRoot(rootDir: string, workspace: string): Promise<RootConfig
     },
   };
   root.profiles.claude!.workspaces.default = workspace;
+  if (agentLauncher) root.profiles.claude!.agentLauncher = agentLauncher;
   await writeJson(resolveAppPaths({ rootDir }).configFile, root);
   await writeFile(join(rootDir, 'active-profile'), 'claude\n', 'utf8');
   return root;

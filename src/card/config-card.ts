@@ -15,6 +15,8 @@ export interface ConfigFormOpts {
   replyInThreadInGroup: boolean;
   /** claude 驱动方式。默认 'pty'。 */
   claudeDriver: 'pty' | 'headless';
+  /** 模型通道:直连本机 claude/codex,或经 seedx 走公司 AI 网关。 */
+  agentLauncher: 'direct' | 'seedx';
   larkCliIdentity: LarkCliIdentityPreset;
   allowedUsers: string[];
   allowedChats: string[];
@@ -229,7 +231,8 @@ export function configFormCard(opts: ConfigFormOpts): object {
               content:
                 '\n**Claude 驱动方式**\n' +
                 '_PTY(默认):伪终端常驻,支持交互式问答和长任务探活;需 node-pty_\n' +
-                '_Headless:claude -p 无头模式,工具渲染更干净,一轮一进程_',
+                '_Headless:claude -p 无头模式,工具渲染更干净,一轮一进程_\n' +
+                '_切换后会在当前任务结束后自动重连生效_',
             },
             {
               tag: 'select_static',
@@ -238,6 +241,23 @@ export function configFormCard(opts: ConfigFormOpts): object {
               options: [
                 { text: { tag: 'plain_text', content: 'PTY(默认)' }, value: 'pty' },
                 { text: { tag: 'plain_text', content: 'Headless' }, value: 'headless' },
+              ],
+            },
+            {
+              tag: 'markdown',
+              content:
+                '\n**模型通道**\n' +
+                '_直连(默认):直接调用本机 claude / codex_\n' +
+                '_seedx:经 `seedx claude|codex` 走公司 AI 网关,需本机已 `seedx login`_\n' +
+                '_切换后会在当前任务结束后自动重连生效_',
+            },
+            {
+              tag: 'select_static',
+              name: 'agent_launcher',
+              initial_option: opts.agentLauncher,
+              options: [
+                { text: { tag: 'plain_text', content: '直连(默认)' }, value: 'direct' },
+                { text: { tag: 'plain_text', content: 'seedx(公司 AI 网关)' }, value: 'seedx' },
               ],
             },
             {
@@ -329,7 +349,8 @@ export function configSavedCard(opts: ConfigFormOpts): object {
             `**run 探活**:\`${opts.runIdleTimeoutMinutes > 0 ? `${opts.runIdleTimeoutMinutes} 分钟` : '关闭'}\`\n` +
             `**群里需要 @ bot**:\`${opts.requireMentionInGroup ? '是' : '否'}\`\n` +
             `**群聊话题回复**:\`${opts.replyInThreadInGroup ? '是' : '否'}\`\n` +
-            `**Claude 驱动**:\`${opts.claudeDriver === 'headless' ? 'Headless' : 'PTY'}\`\n\n` +
+            `**Claude 驱动**:\`${opts.claudeDriver === 'headless' ? 'Headless' : 'PTY'}\`\n` +
+            `**模型通道**:\`${opts.agentLauncher === 'seedx' ? 'seedx(公司 AI 网关)' : '直连'}\`\n\n` +
             `**lark-cli 身份策略**:\`${opts.larkCliIdentity === 'user-default' ? '允许用户身份' : '只允许应用身份'}\`\n\n` +
             '🔒 **访问控制**\n' +
             `**允许私聊的用户**:${summarize(opts.allowedUsers)}\n` +

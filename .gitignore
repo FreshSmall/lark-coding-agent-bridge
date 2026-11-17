@@ -17,3 +17,10 @@ coverage/
 scripts/
 CHANGELOG.md
 tests-smoke/
+
+# ===== seedx managed (BEGIN) — 由 seedx CLI 自动维护,请勿手工编辑 =====
+# 规范:seedx 写入本项目的产物一律以 `seedx` 开头,该前缀为 seedx 保留。
+# 其余规则随产物就近下发到 .claude/ .agents/ .codex/ .harness/ 各自的 .gitignore。
+.intent/
+.seedx/
+# ===== seedx managed (END) =====

@@ -106,7 +106,14 @@ describe('agent launcher wiring', () => {
     }).run({ runId: 'r1', prompt: 'hi', cwd: '/tmp', sandbox: 'read-only' });
     const [file, args, opts] = spawnMock.spawnProcess.mock.calls[0] as [string, string[], { env: NodeJS.ProcessEnv }];
     expect(file).toBe('/opt/bin/seedx');
-    expect(args.slice(0, 5)).toEqual([...SEEDX_PREFIX('codex'), 'exec']);
+    expect(args.slice(0, 9)).toEqual([
+      ...SEEDX_PREFIX('codex'),
+      '-c',
+      'approval_policy="never"',
+      '-c',
+      'shell_environment_policy.inherit="all"',
+      'exec',
+    ]);
     expect(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2)).toEqual(['--sandbox', 'read-only']);
     expect(opts.env.CODEX_HOME).toBe('/tmp/codex-home');
     expect(opts.env).not.toHaveProperty('CLAUDE_CODE_CHILD_SESSION');

@@ -18,13 +18,17 @@ export function buildCodexArgs(input: BuildCodexArgsInput): string[] {
     throw new Error(`unsafe sandbox mode: ${input.sandbox}`);
   }
 
-  const globalFlags = [
-    '--sandbox',
-    input.sandbox,
+  // Codex 0.162.1 drops root-level -c values when exec has its own -c list.
+  // Keep these beside seedx's provider overrides, before the exec subcommand.
+  const configFlags = [
     '-c',
     'approval_policy="never"',
     '-c',
     'shell_environment_policy.inherit="all"',
+  ];
+  const globalFlags = [
+    '--sandbox',
+    input.sandbox,
     ...(input.ignoreUserConfig === true ? ['--ignore-user-config'] : []),
     ...(input.ignoreRules === false ? [] : ['--ignore-rules']),
     '--skip-git-repo-check',
@@ -36,6 +40,7 @@ export function buildCodexArgs(input: BuildCodexArgsInput): string[] {
 
   if (input.threadId) {
     return [
+      ...configFlags,
       'exec',
       ...globalFlags,
       'resume',
@@ -47,6 +52,7 @@ export function buildCodexArgs(input: BuildCodexArgsInput): string[] {
   }
 
   return [
+    ...configFlags,
     'exec',
     '--json',
     ...globalFlags,

@@ -2,16 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { buildCodexArgs } from '../../../src/agent/codex/argv.js';
 
 describe('Codex argv contract', () => {
-  it('builds the fresh exec argv without putting the prompt in argv', () => {
-    expect(buildCodexArgs({ cwd: '/repo', sandbox: 'read-only' })).toEqual([
-      'exec',
-      '--json',
-      '--sandbox',
-      'read-only',
+  it.each([undefined, 'thread-123'])('keeps config overrides before exec so seedx provider injection survives (thread: %s)', (threadId) => {
+    const args = buildCodexArgs({ cwd: '/repo', sandbox: 'read-only', threadId });
+    const execIndex = args.indexOf('exec');
+
+    expect(args.slice(0, execIndex)).toEqual([
       '-c',
       'approval_policy="never"',
       '-c',
       'shell_environment_policy.inherit="all"',
+    ]);
+    expect(args.slice(execIndex + 1)).not.toContain('-c');
+  });
+
+  it('builds the fresh exec argv without putting the prompt in argv', () => {
+    expect(buildCodexArgs({ cwd: '/repo', sandbox: 'read-only' })).toEqual([
+      '-c',
+      'approval_policy="never"',
+      '-c',
+      'shell_environment_policy.inherit="all"',
+      'exec',
+      '--json',
+      '--sandbox',
+      'read-only',
       '--ignore-rules',
       '--skip-git-repo-check',
       '-C',
@@ -28,13 +41,13 @@ describe('Codex argv contract', () => {
         threadId: 'thread-123',
       }),
     ).toEqual([
-      'exec',
-      '--sandbox',
-      'workspace-write',
       '-c',
       'approval_policy="never"',
       '-c',
       'shell_environment_policy.inherit="all"',
+      'exec',
+      '--sandbox',
+      'workspace-write',
       '--ignore-rules',
       '--skip-git-repo-check',
       '-C',
@@ -60,14 +73,14 @@ describe('Codex argv contract', () => {
         images: ['/tmp/image.png'],
       }),
     ).toEqual([
-      'exec',
-      '--json',
-      '--sandbox',
-      'workspace-write',
       '-c',
       'approval_policy="never"',
       '-c',
       'shell_environment_policy.inherit="all"',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
       '--ignore-rules',
       '--skip-git-repo-check',
       '-C',
@@ -88,13 +101,13 @@ describe('Codex argv contract', () => {
         images: ['/tmp/image.png'],
       }),
     ).toEqual([
-      'exec',
-      '--sandbox',
-      'workspace-write',
       '-c',
       'approval_policy="never"',
       '-c',
       'shell_environment_policy.inherit="all"',
+      'exec',
+      '--sandbox',
+      'workspace-write',
       '--ignore-rules',
       '--skip-git-repo-check',
       '-C',
